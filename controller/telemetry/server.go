@@ -63,12 +63,30 @@ var (
 		},
 		requestLabels,
 	)
+
+	promLatencyBuckets = append(append(append(append(append(
+		prometheus.LinearBuckets(1, 1, 5),
+		prometheus.LinearBuckets(10, 10, 5)...),
+		prometheus.LinearBuckets(100, 100, 5)...),
+		prometheus.LinearBuckets(1000, 1000, 5)...),
+		prometheus.LinearBuckets(10000, 10000, 5)...),
+	)
+
+	promLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "prometheus_latency_ms",
+			Help:    "Prometheus latency in milliseconds",
+			Buckets: promLatencyBuckets,
+		},
+		[]string{"query", "range", "step"},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(requestsTotal)
 	prometheus.MustRegister(responsesTotal)
 	prometheus.MustRegister(responseLatency)
+	prometheus.MustRegister(promLatency)
 }
 
 type (
@@ -181,6 +199,17 @@ func NewServer(addr, prometheusUrl string, ignoredNamespaces []string, kubeconfi
 	return s, lis, nil
 }
 
+func timeTrack(start time.Time, name string, queryRange v1.Range) {
+	elapsed := time.Since(start)
+	log.Infof("%s (%s) took %s", name, queryRange, elapsed)
+
+	promLatency.With(prometheus.Labels{
+		"query": name,
+		"range": queryRange.End.Sub(queryRange.Start).String(),
+		"step":  queryRange.Step.String(),
+	}).Observe(float64(elapsed.Nanoseconds() / 1000000))
+}
+
 func (s *server) Query(ctx context.Context, req *read.QueryRequest) (*read.QueryResponse, error) {
 	log.Debugf("Query request: %+v", req)
 
@@ -203,6 +232,7 @@ func (s *server) Query(ctx context.Context, req *read.QueryRequest) (*read.Query
 			Step:  step,
 		}
 
+		defer timeTrack(time.Now(), req.Query, queryRange)
 		res, err := s.prometheusAPI.QueryRange(ctx, req.Query, queryRange)
 		if err != nil {
 			log.Errorf("QueryRange(%+v, %+v) failed with: %+v", req.Query, queryRange, err)
@@ -221,6 +251,7 @@ func (s *server) Query(ctx context.Context, req *read.QueryRequest) (*read.Query
 	} else {
 		// single data point (aka summary) query
 
+		defer timeTrack(time.Now(), req.Query, v1.Range{})
 		res, err := s.prometheusAPI.Query(ctx, req.Query, time.Time{})
 		if err != nil {
 			log.Errorf("Query(%+v, %+v) failed with: %+v", req.Query, time.Time{}, err)
