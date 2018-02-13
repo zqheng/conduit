@@ -18,22 +18,22 @@ services:
     - -metrics-addr=:9999
     - -kubeconfig=/kubeconfig
 
-  tap:
-    build:
-      context: .
-      dockerfile: controller/Dockerfile
-      args:
-      - CONDUIT_VERSION=latest
-    ports:
-    - "8088:8088"
-    - "9998:9998"
-    volumes:
-    - ~/.kube/config:/kubeconfig:ro
-    command:
-    - tap
-    - -addr=:8088
-    - -metrics-addr=:9998
-    - -kubeconfig=/kubeconfig
+  # tap:
+  #   build:
+  #     context: .
+  #     dockerfile: controller/Dockerfile
+  #     args:
+  #     - CONDUIT_VERSION=latest
+  #   ports:
+  #   - "8088:8088"
+  #   - "9998:9998"
+  #   volumes:
+  #   - ~/.kube/config:/kubeconfig:ro
+  #   command:
+  #   - tap
+  #   - -addr=:8088
+  #   - -metrics-addr=:9998
+  #   - -kubeconfig=/kubeconfig
 
   telemetry:
     build:
@@ -106,7 +106,7 @@ services:
     ports:
     - 9090:9090
     volumes:
-    - .prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+    - ./.prometheus.dev:/etc/prometheus/prometheus.yml:ro
     command:
     - -config.file=/etc/prometheus/prometheus.yml
     - -storage.local.memory-chunks=500000

@@ -31,3 +31,6 @@ scrape_configs:
   - job_name: 'destination'
     static_configs:
       - targets: ['destination:9999']
+
+rule_files:
+  - /etc/prometheus/recording-rules.yml

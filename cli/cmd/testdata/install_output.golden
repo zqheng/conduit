@@ -376,3 +376,10 @@ data:
       - source_labels: [__meta_kubernetes_pod_container_name]
         action: replace
         target_label: job
+    rule_files:
+    - /etc/prometheus/recording-rules.yml
+  recording_rules.yml: |-
+    target_deployment:response_latency_ms_bucket:p99 = histogram_quantile(0.99, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
+    target_deployment:response_latency_ms_bucket:p90 = histogram_quantile(0.95, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
+    target_deployment:response_latency_ms_bucket:p50 = histogram_quantile(0.50, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
+    target_deployment:responses_total:irate30s = sum(irate(responses_total{}[30s])) by (target_deployment)
