@@ -35,8 +35,9 @@ type (
 		err    error
 	}
 	queryResult struct {
-		res telemPb.QueryResponse
-		err error
+		query string
+		res   telemPb.QueryResponse
+		err   error
 	}
 	queryResultWithLabel struct {
 		label pb.HistogramLabel
@@ -45,6 +46,12 @@ type (
 
 	// sortable slice of unix ms timestamps
 	timestamps []int64
+
+	partialQuery struct {
+		query        string
+		sumLabels    map[string]struct{}
+		filterLabels map[string]struct{}
+	}
 )
 
 const (
@@ -53,7 +60,11 @@ const (
 	countGrpcQuery                  = "sum(irate(grpc_server_handled_total{%s}[%s])) by (%s)"
 	latencyQuery                    = "sum(irate(response_latency_ms_bucket{%s}[%s])) by (%s)"
 	quantileQuery                   = "histogram_quantile(%s, %s)"
+	sumByQuery                      = "sum(%s) by (%s)"
+	recordingRuleQuery              = "%s:%s:%s{%s}"
 	defaultVectorRange              = "30s" // 3x scrape_interval in prometheus config
+	latencyLevel                    = "target_deployment_source_deployment"
+	latencyMetric                   = "response_latency_ms_bucket"
 	targetPodLabel                  = "target"
 	targetDeployLabel               = "target_deployment"
 	sourcePodLabel                  = "source"
@@ -68,6 +79,12 @@ var (
 		"0.5":  pb.HistogramLabel_P50,
 		"0.95": pb.HistogramLabel_P95,
 		"0.99": pb.HistogramLabel_P99,
+	}
+
+	recordingRuleQuantileMap = map[string]pb.HistogramLabel{
+		"p50": pb.HistogramLabel_P50,
+		"p95": pb.HistogramLabel_P95,
+		"p99": pb.HistogramLabel_P99,
 	}
 
 	stepMap = map[pb.TimeWindow]string{
@@ -86,17 +103,66 @@ var (
 	emptyMetadata = pb.MetricMetadata{}
 )
 
+func (unfinished *partialQuery) finish() string {
+	return fmt.Sprintf(
+		unfinished.query,
+		strings.Join(keySet(unfinished.filterLabels), ","),
+		defaultVectorRange,
+		strings.Join(keySet(unfinished.sumLabels), ","),
+	)
+}
+
+func (unfinished *partialQuery) forRecordingRule(ops string) (string, error) {
+	var level string
+	_, hasTgtDeploy := unfinished.sumLabels["target_deployment"]
+	_, hasSrcDeploy := unfinished.sumLabels["source_deployment"]
+	if hasTgtDeploy && hasSrcDeploy {
+		level = "target_deployment_source_deployment"
+	} else if hasTgtDeploy {
+		level = "target_deployment"
+	} else if hasSrcDeploy {
+		level = "source_deployment"
+	} else {
+		return "", fmt.Errorf("invalid level for recording rule query")
+	}
+	return fmt.Sprintf(
+		recordingRuleQuery,
+		level,
+		unfinished.query,
+		ops,
+		strings.Join(keySet(unfinished.filterLabels), ","),
+	), nil
+}
+
+// it blows my mind that this is not in the standard library.
+func keySet(m map[string]struct{}) []string {
+	keys := make([]string, len(m))
+	i := 0
+	for s := range m {
+		keys[i] = s
+		i++
+	}
+	return keys
+}
+
 func newGrpcServer(telemetryClient telemPb.TelemetryClient, tapClient tapPb.TapClient) *grpcServer {
 	return &grpcServer{telemetryClient: telemetryClient, tapClient: tapClient}
 }
 
 func (s *grpcServer) Stat(ctx context.Context, req *pb.MetricRequest) (*pb.MetricResponse, error) {
+	logCtx := log.WithFields(log.Fields{
+		"req.Metrics":  req.Metrics,
+		"req.FilterBy": req.FilterBy,
+		"req.GroupBy":  req.GroupBy,
+	})
+	logCtx.Debug("Stat()")
 	var err error
 	resultsCh := make(chan metricResult)
 	metrics := make([]*pb.MetricSeries, 0)
 
 	// kick off requests
 	for _, metric := range req.Metrics {
+		logCtx.Debugf("Stat -> queryMetric(%s)", metric)
 		go func(metric pb.MetricName) { resultsCh <- s.queryMetric(ctx, req, metric) }(metric)
 	}
 
@@ -104,7 +170,7 @@ func (s *grpcServer) Stat(ctx context.Context, req *pb.MetricRequest) (*pb.Metri
 	for _ = range req.Metrics {
 		result := <-resultsCh
 		if result.err != nil {
-			log.Errorf("Stat -> queryMetric failed with: %s", err)
+			logCtx.Errorf("Stat -> queryMetric failed with: %s", result.err)
 			err = result.err
 		} else {
 			for i := range result.series {
@@ -286,8 +352,10 @@ func (s *grpcServer) latency(ctx context.Context, req *pb.MetricRequest) ([]pb.M
 	latencies := make(map[pb.MetricMetadata]map[int64][]*pb.HistogramValue)
 	series := make([]pb.MetricSeries, 0)
 
+	contextLogger := log.WithFields(log.Fields{"Metrics": req.Metrics, "GroupBy": req.GroupBy})
 	queryRsps, err := s.queryLatency(ctx, req)
 	if err != nil {
+		contextLogger.Error(err)
 		return nil, err
 	}
 
@@ -366,33 +434,52 @@ func (s *grpcServer) queryCount(ctx context.Context, req *pb.MetricRequest, rawQ
 
 func (s *grpcServer) queryLatency(ctx context.Context, req *pb.MetricRequest) (map[pb.HistogramLabel]telemPb.QueryResponse, error) {
 	queryRsps := make(map[pb.HistogramLabel]telemPb.QueryResponse)
+	logCtx := log.WithFields(log.Fields{
+		"req.Metrics":  req.Metrics,
+		"req.GroupBy":  req.GroupBy,
+		"req.FilterBy": req.FilterBy,
+	})
 
-	query, err := formatQuery(latencyQuery, req, "le")
+	query, err := makePartialQuery(latencyMetric, req)
 	if err != nil {
+		logCtx.Errorf("queryLatency -> formatQuery failed with: %s", err)
 		return nil, err
 	}
 
 	results := make(chan queryResultWithLabel)
 
 	// kick off requests
-	for quantile, label := range quantileMap {
+	for quantile, label := range recordingRuleQuantileMap {
 		go func(quantile string, label pb.HistogramLabel) {
-			q := fmt.Sprintf(quantileQuery, quantile, query)
-
+			q, err := query.forRecordingRule(quantile)
+			var result queryResult
+			if err != nil {
+				result = queryResult{
+					query: "",
+					err:   err,
+				}
+			} else {
+				logCtx.Debugf("queryLatency -> built query %s", q)
+				result = s.query(ctx, req, q)
+			}
 			results <- queryResultWithLabel{
-				queryResult: s.query(ctx, req, q),
+				queryResult: result,
 				label:       label,
 			}
+
 		}(quantile, label)
 	}
 
 	// process results
-	for _ = range quantileMap {
+	for _ = range recordingRuleQuantileMap {
 		result := <-results
+		logCtx := log.WithField("query", result.query)
 		if result.err != nil {
-			log.Errorf("queryLatency -> query failed with: %s", err)
+			logCtx.Errorf("queryLatency -> query failed with: %s", err)
 			err = result.err
 		} else {
+
+			logCtx.Debugf("queryLatency -> returned %s", result.res)
 			queryRsps[result.label] = result.res
 		}
 	}
@@ -406,23 +493,24 @@ func (s *grpcServer) query(ctx context.Context, req *pb.MetricRequest, query str
 		Query: query,
 	}
 
-	if !req.Summarize {
-		start, end, step, err := queryParams(req)
-		if err != nil {
-			return queryResult{res: telemPb.QueryResponse{}, err: err}
-		}
+	start, end, step, err := queryParams(req)
+	if err != nil {
+		return queryResult{res: telemPb.QueryResponse{}, err: err}
+	}
 
+	// EndMs always required to ensure deterministic timestamps
+	queryReq.EndMs = end
+	if !req.Summarize {
 		queryReq.StartMs = start
-		queryReq.EndMs = end
 		queryReq.Step = step
 	}
 
 	queryRsp, err := s.telemetryClient.Query(ctx, queryReq)
 	if err != nil {
-		return queryResult{res: telemPb.QueryResponse{}, err: err}
+		return queryResult{query: query, res: telemPb.QueryResponse{}, err: err}
 	}
 
-	return queryResult{res: *queryRsp, err: nil}
+	return queryResult{query: query, res: *queryRsp, err: nil}
 }
 
 func formatQuery(query string, req *pb.MetricRequest, sumBy string) (string, error) {
@@ -459,6 +547,39 @@ func formatQuery(query string, req *pb.MetricRequest, sumBy string) (string, err
 		defaultVectorRange,
 		strings.Join(sumLabels, ","),
 	), nil
+}
+
+func makePartialQuery(metric string, req *pb.MetricRequest) (*partialQuery, error) {
+	sumLabels := make(map[string]struct{}, 0)
+	filterLabels := make(map[string]struct{}, 0)
+	if str, ok := aggregationMap[req.GroupBy]; ok {
+		sumLabels[str] = struct{}{}
+	} else {
+		return nil, fmt.Errorf("unsupported AggregationType")
+	}
+
+	if metadata := req.FilterBy; metadata != nil {
+		if metadata.TargetDeploy != "" {
+			filter := fmt.Sprintf("%s=\"%s\"", targetDeployLabel, metadata.TargetDeploy)
+			filterLabels[filter] = struct{}{}
+			sumLabels[targetDeployLabel] = struct{}{}
+		}
+		if metadata.SourceDeploy != "" {
+			filter := fmt.Sprintf("%s=\"%s\"", sourceDeployLabel, metadata.SourceDeploy)
+			filterLabels[filter] = struct{}{}
+			sumLabels[sourceDeployLabel] = struct{}{}
+		}
+		if metadata.Component != "" {
+			filter := fmt.Sprintf("%s=\"%s\"", jobLabel, metadata.Component)
+			filterLabels[filter] = struct{}{}
+			sumLabels[jobLabel] = struct{}{}
+		}
+	}
+	return &partialQuery{
+		query:        metric,
+		filterLabels: filterLabels,
+		sumLabels:    sumLabels,
+	}, nil
 }
 
 func queryParams(req *pb.MetricRequest) (int64, int64, string, error) {

@@ -349,9 +349,8 @@ spec:
         image: {{.PrometheusImage}}
         imagePullPolicy: {{.ImagePullPolicy}}
         args:
-        - "-storage.local.retention=6h"
-        - "-storage.local.memory-chunks=500000"
-        - "-config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.retention=6h"
+        - "--config.file=/etc/prometheus/prometheus.yml"
 
       # TODO remove/replace?
       - name: kubectl
@@ -394,11 +393,66 @@ data:
         target_label: job
     rule_files:
     - /etc/prometheus/recording-rules.yml
-  recording_rules.yml: |-
-    target_deployment:response_latency_ms_bucket:p99 = histogram_quantile(0.99, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
-    target_deployment:response_latency_ms_bucket:p90 = histogram_quantile(0.95, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
-    target_deployment:response_latency_ms_bucket:p50 = histogram_quantile(0.50, sum(irate(response_latency_ms_bucket{}[30s])) by (target_deployment,le))
-    target_deployment:responses_total:irate30s = sum(irate(responses_total{}[30s])) by (target_deployment)
+  recording-rules.yml: |-
+    groups:
+    - name: target_deployment_source_deployment:response_latency_ms_bucket
+      rules:
+      - record: target_deployment_source_deployment:response_latency_ms_bucket:irate30s
+        expr: sum (irate(response_latency_ms_bucket[30s]))
+              by (target_deployment, le, source_deployment)
+      - record: target_deployment_source_deployment:response_latency_ms_bucket:p99
+        expr:
+          histogram_quantile(0.99, target_deployment_source_deployment:response_latency_ms_bucket:irate30s)
+      - record: target_deployment_source_deployment:response_latency_ms_bucket:p95
+        expr:
+          histogram_quantile(0.95,
+          target_deployment_source_deployment:response_latency_ms_bucket:irate30s)
+      - record: target_deployment_source_deployment:response_latency_ms_bucket:p50
+        expr:
+          histogram_quantile(0.50,
+          target_deployment_source_deployment:response_latency_ms_bucket:irate30s)
+
+    - name: source_deployment:response_latency_ms_bucket
+      rules:
+      - record: source_deployment:response_latency_ms_bucket:irate30s
+        expr: sum (irate(response_latency_ms_bucket[30s]))
+              by (le, source_deployment)
+      - record: source_deployment:response_latency_ms_bucket:p99
+        expr:
+          histogram_quantile(0.99,
+          source_deployment:response_latency_ms_bucket:irate30s)
+      - record: source_deployment:response_latency_ms_bucket:p95
+        expr:
+          histogram_quantile(0.95,
+          source_deployment:response_latency_ms_bucket:irate30s)
+      - record: source_deployment:response_latency_ms_bucket:p50
+        expr:
+          histogram_quantile(0.50,
+          source_deployment:response_latency_ms_bucket:irate30s)
+
+    - name: target_deployment:response_latency_ms_bucket
+      rules:
+      - record: target_deployment:response_latency_ms_bucket:irate30s
+        expr: sum (irate(response_latency_ms_bucket[30s]))
+              by (le, target_deployment)
+      - record: target_deployment:response_latency_ms_bucket:p99
+        expr:
+          histogram_quantile(0.99,
+          target_deployment:response_latency_ms_bucket:irate30s)
+      - record: target_deployment:response_latency_ms_bucket:p95
+        expr:
+          histogram_quantile(0.95,
+          target_deployment:response_latency_ms_bucket:irate30s)
+      - record: target_deployment:response_latency_ms_bucket:p50
+        expr:
+          histogram_quantile(0.50,
+          target_deployment:response_latency_ms_bucket:irate30s)
+
+    - name: responses_total
+      rules:
+      - record: target_deployment:responses_total:irate30s
+        expr: sum by(target_deployment) (irate(responses_total[30s]))
+
 `
 
 type installConfig struct {
@@ -439,7 +493,7 @@ var installCmd = &cobra.Command{
 			Namespace:                controlPlaneNamespace,
 			ControllerImage:          fmt.Sprintf("%s/controller:%s", dockerRegistry, conduitVersion),
 			WebImage:                 fmt.Sprintf("%s/web:%s", dockerRegistry, conduitVersion),
-			PrometheusImage:          "prom/prometheus:v1.8.1",
+			PrometheusImage:          "prom/prometheus:v2.1.0",
 			ControllerReplicas:       controllerReplicas,
 			WebReplicas:              webReplicas,
 			PrometheusReplicas:       prometheusReplicas,
