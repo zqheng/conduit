@@ -104,7 +104,7 @@ func (s *grpcServer) Stat(ctx context.Context, req *pb.MetricRequest) (*pb.Metri
 	for _ = range req.Metrics {
 		result := <-resultsCh
 		if result.err != nil {
-			log.Errorf("Stat -> queryMetric failed with: %s", err)
+			log.Errorf("Stat -> queryMetric failed with: %s", result.err)
 			err = result.err
 		} else {
 			for i := range result.series {
@@ -361,7 +361,12 @@ func (s *grpcServer) queryCount(ctx context.Context, req *pb.MetricRequest, rawQ
 		return queryResult{res: telemPb.QueryResponse{}, err: err}
 	}
 
-	return s.query(ctx, req, query)
+	queryReq, err := reqToQueryReq(req, query)
+	if err != nil {
+		return queryResult{res: telemPb.QueryResponse{}, err: err}
+	}
+
+	return s.query(ctx, queryReq)
 }
 
 func (s *grpcServer) queryLatency(ctx context.Context, req *pb.MetricRequest) (map[pb.HistogramLabel]telemPb.QueryResponse, error) {
@@ -372,15 +377,24 @@ func (s *grpcServer) queryLatency(ctx context.Context, req *pb.MetricRequest) (m
 		return nil, err
 	}
 
+	// omit query string, we'll fill it in later
+	queryReq, err := reqToQueryReq(req, "")
+	if err != nil {
+		return nil, err
+	}
+
 	results := make(chan queryResultWithLabel)
 
 	// kick off requests
 	for quantile, label := range quantileMap {
 		go func(quantile string, label pb.HistogramLabel) {
-			q := fmt.Sprintf(quantileQuery, quantile, query)
+			// copy queryReq, gets us StartMS, EndMS, and Step
+			qr := queryReq
+			// insert our quantile-specific query
+			qr.Query = fmt.Sprintf(quantileQuery, quantile, query)
 
 			results <- queryResultWithLabel{
-				queryResult: s.query(ctx, req, q),
+				queryResult: s.query(ctx, qr),
 				label:       label,
 			}
 		}(quantile, label)
@@ -401,28 +415,33 @@ func (s *grpcServer) queryLatency(ctx context.Context, req *pb.MetricRequest) (m
 	return queryRsps, err
 }
 
-func (s *grpcServer) query(ctx context.Context, req *pb.MetricRequest, query string) queryResult {
-	queryReq := &telemPb.QueryRequest{
-		Query: query,
-	}
-
-	if !req.Summarize {
-		start, end, step, err := queryParams(req)
-		if err != nil {
-			return queryResult{res: telemPb.QueryResponse{}, err: err}
-		}
-
-		queryReq.StartMs = start
-		queryReq.EndMs = end
-		queryReq.Step = step
-	}
-
-	queryRsp, err := s.telemetryClient.Query(ctx, queryReq)
+func (s *grpcServer) query(ctx context.Context, queryReq telemPb.QueryRequest) queryResult {
+	queryRsp, err := s.telemetryClient.Query(ctx, &queryReq)
 	if err != nil {
 		return queryResult{res: telemPb.QueryResponse{}, err: err}
 	}
 
 	return queryResult{res: *queryRsp, err: nil}
+}
+
+func reqToQueryReq(req *pb.MetricRequest, query string) (telemPb.QueryRequest, error) {
+	start, end, step, err := queryParams(req)
+	if err != nil {
+		return telemPb.QueryRequest{}, err
+	}
+
+	// EndMs always required to ensure deterministic timestamps
+	queryReq := telemPb.QueryRequest{
+		Query: query,
+		EndMs: end,
+	}
+
+	if !req.Summarize {
+		queryReq.StartMs = start
+		queryReq.Step = step
+	}
+
+	return queryReq, nil
 }
 
 func formatQuery(query string, req *pb.MetricRequest, sumBy string) (string, error) {
