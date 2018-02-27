@@ -95,8 +95,6 @@ where
 
         });
 
-        let proto = bind::Protocol::from_req(req, local.as_ref())?;
-
         // If we can't fully qualify the authority as a local service,
         // and there is no original dst, then we have nothing! In that
         // case, we return `None`, which results an "unrecognized" error.
@@ -107,6 +105,8 @@ where
         let dest = local.map(Destination::from)
             .or_else(|| bind::request_orig_dst(req).map(Destination::from))
             ?;
+
+        let proto = bind::Protocol::from(req);
 
         Some((dest, proto))
     }
