@@ -57,6 +57,21 @@ pub enum Destination {
     External(SocketAddr),
 }
 
+impl From<FullyQualifiedAuthority> for Destination {
+    #[inline]
+    fn from(authority: FullyQualifiedAuthority) -> Self {
+        Destination::LocalSvc(authority)
+    }
+}
+
+impl From<SocketAddr> for Destination {
+    #[inline]
+    fn from(addr: SocketAddr) -> Self {
+        Destination::External(addr)
+    }
+}
+
+
 impl<B> Recognize for Outbound<B>
 where
     B: tower_h2::Body + 'static,
@@ -80,6 +95,8 @@ where
 
         });
 
+        let proto = bind::Protocol::from_req(req, local.as_ref())?;
+
         // If we can't fully qualify the authority as a local service,
         // and there is no original dst, then we have nothing! In that
         // case, we return `None`, which results an "unrecognized" error.
@@ -87,21 +104,9 @@ where
         // In practice, this shouldn't ever happen, since we expect the proxy
         // to be run on Linux servers, with iptables setup, so there should
         // always be an original destination.
-        let dest = if let Some(local) = local {
-            Destination::LocalSvc(local)
-        } else {
-            let orig_dst = req.extensions()
-                .get::<Arc<ctx::transport::Server>>()
-                .and_then(|ctx| {
-                    ctx.orig_dst_if_not_local()
-                });
-            Destination::External(orig_dst?)
-        };
-
-        let proto = match req.version() {
-            http::Version::HTTP_2 => Protocol::Http2,
-            _ => Protocol::Http1,
-        };
+        let dest = local.map(Destination::from)
+            .or_else(|| bind::request_orig_dst(req).map(Destination::from))
+            ?;
 
         Some((dest, proto))
     }
@@ -119,18 +124,19 @@ where
         &mut self,
         key: &Self::Key,
     ) -> Result<Self::Service, Self::RouteError> {
-        let &(ref dest, protocol) = key;
+        let &(ref dest, ref protocol) = key;
         debug!("building outbound {:?} client to {:?}", protocol, dest);
 
         let resolve = match *dest {
             Destination::LocalSvc(ref authority) => {
                 Discovery::LocalSvc(self.discovery.resolve(
                     authority,
-                    self.bind.clone().with_protocol(protocol),
+                    self.bind.clone().with_protocol(protocol.clone()),
                 ))
             },
             Destination::External(addr) => {
-                Discovery::External(Some((addr, self.bind.clone().with_protocol(protocol))))
+                Discovery::External(Some((addr, self.bind.clone()
+                    .with_protocol(protocol.clone()))))
             }
         };
 
