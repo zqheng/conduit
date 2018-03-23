@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"k8s.io/api/core/v1"
 	// Load all the auth plugins for the cloud providers.
+	"github.com/runconduit/conduit/pkg/telemetry"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
@@ -41,7 +42,7 @@ type proxyMetricCollectors struct {
 }
 
 var (
-	labels            = generatePromLabels()
+	labels            = telemetry.GeneratePromLabels()
 	grpcResponseCodes = []codes.Code{
 		codes.OK,
 		codes.PermissionDenied,
@@ -207,30 +208,6 @@ func randomRequestDirection() string {
 		return "inbound"
 	}
 	return "outbound"
-}
-
-func generatePromLabels() []string {
-	kubeResourceTypes := []string{
-		"job",
-		"replica_set",
-		"deployment",
-		"daemon_set",
-		"replication_controller",
-		"namespace",
-	}
-	constantLabels := []string{
-		"direction",
-		"authority",
-		"status_code",
-		"grpc_status_code",
-	}
-
-	destinationLabels := make([]string, len(kubeResourceTypes))
-
-	for i, label := range kubeResourceTypes {
-		destinationLabels[i] = fmt.Sprintf("dst_%s", label)
-	}
-	return append(append(constantLabels, kubeResourceTypes...), destinationLabels...)
 }
 
 // overrideDefaultLabels combines two maps of the same size with the keys

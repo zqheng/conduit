@@ -9,11 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/runconduit/conduit/controller/api/util"
 	healthcheckPb "github.com/runconduit/conduit/controller/gen/common/healthcheck"
 	tapPb "github.com/runconduit/conduit/controller/gen/controller/tap"
 	telemPb "github.com/runconduit/conduit/controller/gen/controller/telemetry"
 	pb "github.com/runconduit/conduit/controller/gen/public"
+	"github.com/runconduit/conduit/controller/k8s"
 	"github.com/runconduit/conduit/pkg/version"
 	log "github.com/sirupsen/logrus"
 )
@@ -23,6 +25,9 @@ type (
 		telemetryClient     telemPb.TelemetryClient
 		tapClient           tapPb.TapClient
 		controllerNamespace string
+		prometheusAPI       v1.API
+		pods                *k8s.PodIndex
+		replicaSets         *k8s.ReplicaSetStore
 	}
 
 	successRate struct {
