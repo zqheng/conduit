@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/api"
 	"github.com/runconduit/conduit/controller/api/public"
 	"github.com/runconduit/conduit/controller/tap"
-	"github.com/runconduit/conduit/controller/telemetry"
 	"github.com/runconduit/conduit/controller/util"
 	"github.com/runconduit/conduit/pkg/version"
 	log "github.com/sirupsen/logrus"
@@ -18,7 +18,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8085", "address to serve on")
 	metricsAddr := flag.String("metrics-addr", ":9995", "address to serve scrapable metrics on")
-	telemetryAddr := flag.String("telemetry-addr", "127.0.0.1:8087", "address of telemetry service")
+	prometheusUrl := flag.String("prometheus-url", "http://127.0.0.1:9090", "prometheus url")
 	tapAddr := flag.String("tap-addr", "127.0.0.1:8088", "address of tap service")
 	controllerNamespace := flag.String("controller-namespace", "conduit", "namespace in which Conduit is installed")
 	logLevel := flag.String("log-level", log.InfoLevel.String(), "log level, must be one of: panic, fatal, error, warn, info, debug")
@@ -37,11 +37,10 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	telemetryClient, telemetryConn, err := telemetry.NewClient(*telemetryAddr)
+	prometheusClient, err := api.NewClient(api.Config{Address: *prometheusUrl})
 	if err != nil {
 		log.Fatal(err.Error())
 	}
-	defer telemetryConn.Close()
 
 	tapClient, tapConn, err := tap.NewClient(*tapAddr)
 	if err != nil {
@@ -49,7 +48,7 @@ func main() {
 	}
 	defer tapConn.Close()
 
-	server := public.NewServer(*addr, telemetryClient, tapClient, *controllerNamespace)
+	server := public.NewServer(*addr, prometheusClient, tapClient, *controllerNamespace)
 
 	go func() {
 		log.Infof("starting HTTP server on %+v", *addr)

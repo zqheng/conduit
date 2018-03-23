@@ -6,10 +6,10 @@ import (
 	"net/http"
 
 	"github.com/golang/protobuf/jsonpb"
+	"github.com/prometheus/client_golang/api"
 	common "github.com/runconduit/conduit/controller/gen/common"
 	healthcheckPb "github.com/runconduit/conduit/controller/gen/common/healthcheck"
 	tapPb "github.com/runconduit/conduit/controller/gen/controller/tap"
-	telemPb "github.com/runconduit/conduit/controller/gen/controller/telemetry"
 	pb "github.com/runconduit/conduit/controller/gen/public"
 	"github.com/runconduit/conduit/controller/util"
 	log "github.com/sirupsen/logrus"
@@ -192,9 +192,9 @@ func fullUrlPathFor(method string) string {
 	return ApiRoot + ApiPrefix + method
 }
 
-func NewServer(addr string, telemetryClient telemPb.TelemetryClient, tapClient tapPb.TapClient, controllerNamespace string) *http.Server {
+func NewServer(addr string, prometheusClient api.Client, tapClient tapPb.TapClient, controllerNamespace string) *http.Server {
 	baseHandler := &handler{
-		grpcServer: newGrpcServer(telemetryClient, tapClient, controllerNamespace),
+		grpcServer: newGrpcServer(prometheusClient, tapClient, controllerNamespace),
 	}
 
 	instrumentedHandler := util.WithTelemetry(baseHandler)

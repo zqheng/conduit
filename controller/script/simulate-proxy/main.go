@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"k8s.io/api/core/v1"
 	// Load all the auth plugins for the cloud providers.
-	"github.com/runconduit/conduit/pkg/telemetry"
+	"github.com/runconduit/conduit/controller/api/public"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
@@ -42,7 +42,7 @@ type proxyMetricCollectors struct {
 }
 
 var (
-	labels            = telemetry.GeneratePromLabels()
+	labels            = public.GeneratePromLabels()
 	grpcResponseCodes = []codes.Code{
 		codes.OK,
 		codes.PermissionDenied,

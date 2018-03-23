@@ -9,25 +9,112 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/protobuf/ptypes/duration"
+	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
 	"github.com/runconduit/conduit/controller/api/util"
 	healthcheckPb "github.com/runconduit/conduit/controller/gen/common/healthcheck"
 	tapPb "github.com/runconduit/conduit/controller/gen/controller/tap"
 	telemPb "github.com/runconduit/conduit/controller/gen/controller/telemetry"
 	pb "github.com/runconduit/conduit/controller/gen/public"
 	"github.com/runconduit/conduit/controller/k8s"
+	pkgK8s "github.com/runconduit/conduit/pkg/k8s"
 	"github.com/runconduit/conduit/pkg/version"
 	log "github.com/sirupsen/logrus"
+	k8sV1 "k8s.io/api/core/v1"
 )
+
+const (
+	reportsMetric = "reports_total"
+)
+
+var (
+	requestLabels = []string{"source_deployment", "target_deployment"}
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Total number of requests",
+		},
+		requestLabels,
+	)
+
+	responseLabels = append(requestLabels, []string{"http_status_code", "classification"}...)
+	responsesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "responses_total",
+			Help: "Total number of responses",
+		},
+		responseLabels,
+	)
+
+	responseLatencyBuckets = append(append(append(append(append(
+		prometheus.LinearBuckets(1, 1, 5),
+		prometheus.LinearBuckets(10, 10, 5)...),
+		prometheus.LinearBuckets(100, 100, 5)...),
+		prometheus.LinearBuckets(1000, 1000, 5)...),
+		prometheus.LinearBuckets(10000, 10000, 5)...),
+	)
+
+	responseLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "response_latency_ms",
+			Help:    "Response latency in milliseconds",
+			Buckets: responseLatencyBuckets,
+		},
+		requestLabels,
+	)
+
+	reportsLabels = []string{"pod"}
+	reportsTotal  = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: reportsMetric,
+			Help: "Total number of telemetry reports received",
+		},
+		reportsLabels,
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestsTotal)
+	prometheus.MustRegister(responsesTotal)
+	prometheus.MustRegister(responseLatency)
+	prometheus.MustRegister(reportsTotal)
+}
+
+func GeneratePromLabels() []string {
+	kubeResourceTypes := []string{
+		"job",
+		"replica_set",
+		"deployment",
+		"daemon_set",
+		"replication_controller",
+		"namespace",
+	}
+	constantLabels := []string{
+		"direction",
+		"authority",
+		"status_code",
+		"grpc_status_code",
+	}
+
+	destinationLabels := make([]string, len(kubeResourceTypes))
+
+	for i, label := range kubeResourceTypes {
+		destinationLabels[i] = fmt.Sprintf("dst_%s", label)
+	}
+	return append(append(constantLabels, kubeResourceTypes...), destinationLabels...)
+}
 
 type (
 	grpcServer struct {
-		telemetryClient     telemPb.TelemetryClient
 		tapClient           tapPb.TapClient
 		controllerNamespace string
 		prometheusAPI       v1.API
 		pods                *k8s.PodIndex
 		replicaSets         *k8s.ReplicaSetStore
+		ignoredNamespaces   []string
 	}
 
 	successRate struct {
@@ -55,7 +142,7 @@ type (
 
 const (
 	countQuery                      = "sum(irate(responses_total{%s}[%s])) by (%s)"
-	countHttpQuery                  = "sum(irate(http_requests_total{%s}[%s])) by (%s)"
+	countHttpQuery                  = "sum(irate(requests_total{%s}[%s])) by (%s)"
 	countGrpcQuery                  = "sum(irate(grpc_server_handled_total{%s}[%s])) by (%s)"
 	latencyQuery                    = "sum(irate(response_latency_ms_bucket{%s}[%s])) by (%s)"
 	quantileQuery                   = "histogram_quantile(%s, %s)"
@@ -93,8 +180,8 @@ var (
 	controlPlaneComponents = []string{"web", "controller", "prometheus", "grafana"}
 )
 
-func newGrpcServer(telemetryClient telemPb.TelemetryClient, tapClient tapPb.TapClient, controllerNamespace string) *grpcServer {
-	return &grpcServer{telemetryClient: telemetryClient, tapClient: tapClient, controllerNamespace: controllerNamespace}
+func newGrpcServer(prometheusClient api.Client, tapClient tapPb.TapClient, controllerNamespace string) *grpcServer {
+	return &grpcServer{prometheusAPI: v1.NewAPI(prometheusClient), tapClient: tapClient, controllerNamespace: controllerNamespace}
 }
 
 func (s *grpcServer) Stat(ctx context.Context, req *pb.MetricRequest) (*pb.MetricResponse, error) {
@@ -160,14 +247,6 @@ func (_ *grpcServer) Version(ctx context.Context, req *pb.Empty) (*pb.VersionInf
 	return &pb.VersionInfo{GoVersion: runtime.Version(), ReleaseVersion: version.Version, BuildDate: "1970-01-01T00:00:00Z"}, nil
 }
 
-func (s *grpcServer) ListPods(ctx context.Context, req *pb.Empty) (*pb.ListPodsResponse, error) {
-	resp, err := s.telemetryClient.ListPods(ctx, &telemPb.ListPodsRequest{})
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
 func (s *grpcServer) SelfCheck(ctx context.Context, in *healthcheckPb.SelfCheckRequest) (*healthcheckPb.SelfCheckResponse, error) {
 	telemetryClientCheck := &healthcheckPb.CheckResult{
 		SubsystemName:    TelemetryClientSubsystemName,
@@ -175,7 +254,7 @@ func (s *grpcServer) SelfCheck(ctx context.Context, in *healthcheckPb.SelfCheckR
 		Status:           healthcheckPb.CheckStatus_OK,
 	}
 
-	_, err := s.telemetryClient.ListPods(ctx, &telemPb.ListPodsRequest{})
+	_, err := s.ListPods(ctx, &pb.Empty{})
 	if err != nil {
 		telemetryClientCheck.Status = healthcheckPb.CheckStatus_ERROR
 		telemetryClientCheck.FriendlyMessageToUser = fmt.Sprintf("Error talking to telemetry service from control plane: %s", err.Error())
@@ -423,7 +502,7 @@ func (s *grpcServer) queryLatency(ctx context.Context, req *pb.MetricRequest) (m
 }
 
 func (s *grpcServer) query(ctx context.Context, queryReq telemPb.QueryRequest) queryResult {
-	queryRsp, err := s.telemetryClient.Query(ctx, &queryReq)
+	queryRsp, err := s.Query(ctx, &queryReq)
 	if err != nil {
 		return queryResult{res: telemPb.QueryResponse{}, err: err}
 	}
@@ -665,4 +744,183 @@ func sortTimestamps(timestampMap map[int64]struct{}) timestamps {
 	}
 	sort.Sort(sorted)
 	return sorted
+}
+
+//Telemetry Query
+func (s *grpcServer) ListPods(ctx context.Context, req *pb.Empty) (*pb.ListPodsResponse, error) {
+	log.Debugf("ListPods request: %+v", req)
+
+	pods, err := s.pods.List()
+	if err != nil {
+		return nil, err
+	}
+
+	// Reports is a map from instance name to the absolute time of the most recent
+	// report from that instance.
+	reports := make(map[string]time.Time)
+	// Query Prometheus for reports in the last 30 seconds.
+	res, err := s.prometheusAPI.Query(ctx, reportsMetric+"[30s]", time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	if res.Type() != model.ValMatrix {
+		err = fmt.Errorf("Unexpected query result type (expected Matrix): %s", res.Type())
+		log.Error(err)
+		return nil, err
+	}
+	for _, s := range res.(model.Matrix) {
+		labels := metricToMap(s.Metric)
+		timestamp := s.Values[len(s.Values)-1].Timestamp
+		reports[labels["pod"]] = time.Unix(0, int64(timestamp)*int64(time.Millisecond))
+	}
+
+	podList := make([]*pb.Pod, 0)
+
+	for _, pod := range pods {
+		if s.shouldIngore(pod) {
+			continue
+		}
+		deployment, err := s.replicaSets.GetDeploymentForPod(pod)
+		if err != nil {
+			log.Debugf("Cannot get deployment for pod %s: %s", pod.Name, err)
+			deployment = ""
+		}
+		name := pod.Namespace + "/" + pod.Name
+		updated, added := reports[name]
+
+		status := string(pod.Status.Phase)
+		if pod.DeletionTimestamp != nil {
+			status = "Terminating"
+		}
+
+		controllerComponent := pod.Labels[pkgK8s.ControllerComponentLabel]
+		controllerNS := pod.Labels[pkgK8s.ControllerNSLabel]
+
+		item := &pb.Pod{
+			Name:                pod.Namespace + "/" + pod.Name,
+			Deployment:          deployment,
+			Status:              status,
+			PodIP:               pod.Status.PodIP,
+			Added:               added,
+			ControllerNamespace: controllerNS,
+			ControlPlane:        controllerComponent != "",
+		}
+		if added {
+			since := time.Since(updated)
+			item.SinceLastReport = &duration.Duration{
+				Seconds: int64(since / time.Second),
+				Nanos:   int32(since % time.Second),
+			}
+		}
+		podList = append(podList, item)
+	}
+
+	return &pb.ListPodsResponse{Pods: podList}, nil
+}
+
+func (s *grpcServer) shouldIngore(pod *k8sV1.Pod) bool {
+	for _, namespace := range s.ignoredNamespaces {
+		if pod.Namespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *grpcServer) Query(ctx context.Context, req *telemPb.QueryRequest) (*telemPb.QueryResponse, error) {
+	log.Debugf("Query request: %+v", req)
+
+	samples := make([]*telemPb.Sample, 0)
+
+	if req.EndMs == 0 {
+		err := fmt.Errorf("EndMs timestamp missing from request: %+v", req)
+		log.Errorf("%s", err)
+		return nil, err
+	}
+	end := time.Unix(0, req.EndMs*int64(time.Millisecond))
+
+	if req.StartMs != 0 && req.EndMs != 0 && req.Step != "" {
+		// timeseries query
+
+		start := time.Unix(0, req.StartMs*int64(time.Millisecond))
+		step, err := time.ParseDuration(req.Step)
+		if err != nil {
+			log.Errorf("ParseDuration(%+v) failed with: %+v", req.Step, err)
+			return nil, err
+		}
+
+		queryRange := v1.Range{
+			Start: start,
+			End:   end,
+			Step:  step,
+		}
+
+		res, err := s.prometheusAPI.QueryRange(ctx, req.Query, queryRange)
+		if err != nil {
+			log.Errorf("QueryRange(%+v, %+v) failed with: %+v", req.Query, queryRange, err)
+			return nil, err
+		}
+		log.Debugf("Query response: %+v", res)
+
+		if res.Type() != model.ValMatrix {
+			err = fmt.Errorf("Unexpected query result type (expected Matrix): %s", res.Type())
+			log.Error(err)
+			return nil, err
+		}
+		for _, s := range res.(model.Matrix) {
+			samples = append(samples, convertSampleStream(s))
+		}
+	} else {
+		// single data point (aka summary) query
+
+		res, err := s.prometheusAPI.Query(ctx, req.Query, end)
+		if err != nil {
+			log.Errorf("Query(%+v, %+v) failed with: %+v", req.Query, end, err)
+			return nil, err
+		}
+		log.Debugf("Query response: %+v", res)
+
+		if res.Type() != model.ValVector {
+			err = fmt.Errorf("Unexpected query result type (expected Vector): %s", res.Type())
+			log.Error(err)
+			return nil, err
+		}
+		for _, s := range res.(model.Vector) {
+			samples = append(samples, convertSample(s))
+		}
+	}
+
+	return &telemPb.QueryResponse{Metrics: samples}, nil
+}
+
+func convertSampleStream(sample *model.SampleStream) *telemPb.Sample {
+	values := make([]*telemPb.SampleValue, 0)
+	for _, s := range sample.Values {
+		v := telemPb.SampleValue{
+			Value:       float64(s.Value),
+			TimestampMs: int64(s.Timestamp),
+		}
+		values = append(values, &v)
+	}
+
+	return &telemPb.Sample{Values: values, Labels: metricToMap(sample.Metric)}
+}
+
+func convertSample(sample *model.Sample) *telemPb.Sample {
+	values := []*telemPb.SampleValue{
+		&telemPb.SampleValue{
+			Value:       float64(sample.Value),
+			TimestampMs: int64(sample.Timestamp),
+		},
+	}
+
+	return &telemPb.Sample{Values: values, Labels: metricToMap(sample.Metric)}
+}
+
+func metricToMap(metric model.Metric) map[string]string {
+	labels := make(map[string]string)
+	for k, v := range metric {
+		labels[string(k)] = string(v)
+	}
+	return labels
 }
