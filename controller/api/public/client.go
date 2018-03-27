@@ -36,6 +36,12 @@ func (c *grpcOverHttpClient) Stat(ctx context.Context, req *pb.MetricRequest, _ 
 	return &msg, err
 }
 
+func (c *grpcOverHttpClient) StatV2(ctx context.Context, req *pb.MetricRequestV2, _ ...grpc.CallOption) (*pb.MetricResponseV2, error) {
+	var msg pb.MetricResponseV2
+	err := c.apiRequest(ctx, "StatV2", req, &msg)
+	return &msg, err
+}
+
 func (c *grpcOverHttpClient) Version(ctx context.Context, req *pb.Empty, _ ...grpc.CallOption) (*pb.VersionInfo, error) {
 	var msg pb.VersionInfo
 	err := c.apiRequest(ctx, "Version", req, &msg)

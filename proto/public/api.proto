@@ -80,6 +80,26 @@ message MetricRequest {
   bool summarize = 5;
 }
 
+
+
+message MetricRequestV2 {
+  repeated MetricName metrics = 1;
+  TimeWindow window = 2;
+  string groupBy = 3;
+  map<string, string> filterBy = 4;
+  bool summarize = 5;
+  string namespace = 6;
+}
+message MetricResponseV2 {
+  repeated MetricSeriesV2 metrics = 1;
+}
+message MetricSeriesV2 {
+  MetricName name = 1;
+  map<string, string> metadata = 2;
+  repeated MetricDatapoint datapoints = 3;
+}
+
+
 message Empty {}
 
 message VersionInfo {
@@ -126,6 +146,7 @@ message ApiError {
 
 service Api {
   rpc Stat(MetricRequest) returns (MetricResponse) {}
+  rpc StatV2(MetricRequestV2) returns (MetricResponseV2) {}
   rpc Version(Empty) returns (VersionInfo) {}
   rpc ListPods(Empty) returns (ListPodsResponse) {}
   rpc SelfCheck(common.healthcheck.SelfCheckRequest) returns (common.healthcheck.SelfCheckResponse) {}

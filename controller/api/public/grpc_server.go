@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	promApi "github.com/prometheus/client_golang/api"
+	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/runconduit/conduit/controller/api/util"
 	healthcheckPb "github.com/runconduit/conduit/controller/gen/common/healthcheck"
 	tapPb "github.com/runconduit/conduit/controller/gen/controller/tap"
@@ -16,10 +18,13 @@ import (
 	pb "github.com/runconduit/conduit/controller/gen/public"
 	"github.com/runconduit/conduit/pkg/version"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/client-go/kubernetes"
 )
 
 type (
 	grpcServer struct {
+		k8sClient           *kubernetes.Clientset
+		prometheusAPI       promv1.API
 		telemetryClient     telemPb.TelemetryClient
 		tapClient           tapPb.TapClient
 		controllerNamespace string
@@ -33,6 +38,11 @@ type (
 	// these structs couple responses with an error, useful when returning results via channels
 	metricResult struct {
 		series []pb.MetricSeries
+		err    error
+	}
+
+	metricResultV2 struct {
+		series []pb.MetricSeriesV2
 		err    error
 	}
 	queryResult struct {
@@ -88,8 +98,14 @@ var (
 	controlPlaneComponents = []string{"web", "controller", "prometheus", "grafana"}
 )
 
-func newGrpcServer(telemetryClient telemPb.TelemetryClient, tapClient tapPb.TapClient, controllerNamespace string) *grpcServer {
-	return &grpcServer{telemetryClient: telemetryClient, tapClient: tapClient, controllerNamespace: controllerNamespace}
+func newGrpcServer(k8sClient *kubernetes.Clientset, prometheusClient promApi.Client, telemetryClient telemPb.TelemetryClient, tapClient tapPb.TapClient, controllerNamespace string) *grpcServer {
+	return &grpcServer{
+		k8sClient:           k8sClient,
+		prometheusAPI:       promv1.NewAPI(prometheusClient),
+		telemetryClient:     telemetryClient,
+		tapClient:           tapClient,
+		controllerNamespace: controllerNamespace,
+	}
 }
 
 func (s *grpcServer) Stat(ctx context.Context, req *pb.MetricRequest) (*pb.MetricResponse, error) {
