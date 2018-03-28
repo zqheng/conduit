@@ -33,6 +33,7 @@ type installConfig struct {
 	ControllerLogLevel       string
 	ControllerComponentLabel string
 	CreatedByAnnotation      string
+	CertificateBundleName    string
 }
 
 var (
@@ -80,6 +81,7 @@ func validateAndBuildConfig() (*installConfig, error) {
 		ControllerLogLevel:       controllerLogLevel,
 		ControllerComponentLabel: k8s.ControllerComponentLabel,
 		CreatedByAnnotation:      k8s.CreatedByAnnotation,
+		CertificateBundleName:    k8s.CertificateBundleName,
 	}, nil
 }
 
