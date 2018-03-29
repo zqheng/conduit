@@ -2,6 +2,7 @@ package public
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -24,7 +25,7 @@ func (s *grpcServer) StatV2(ctx context.Context, req *pb.MetricRequestV2) (*pb.M
 	for _ = range req.Metrics {
 		result := <-resultsCh
 		if result.err != nil {
-			log.Errorf("Stat -> queryMetric failed with: %s", result.err)
+			log.Errorf("Stat -> queryMetric2 failed with: %s", result.err)
 			err = result.err
 		} else {
 			for i := range result.series {
@@ -48,13 +49,50 @@ func (s *grpcServer) queryMetric2(ctx context.Context, req *pb.MetricRequestV2, 
 		result.err = fmt.Errorf("unsupported metric: %s", metric)
 	}
 
-	log.Info("queryMetric2 ***************************")
 	log.Info(result.series)
 	return result
 }
 
+type metricFn func(context.Context, string) promResult
+
+func (s *grpcServer) allResourcesRequestRate(ctx context.Context, namespace string) promResult {
+	var err error
+	resources := []metricFn{s.deployRequestRate, s.podRequestRate} // todo add all resources
+	resultsCh := make(chan promResult)
+	metrics := make([]*labelledSample, 0)
+
+	// kick off requests
+	for _, getFn := range resources {
+		go func() { resultsCh <- getFn(ctx, namespace) }()
+	}
+	// process results
+	for _ = range resources {
+		metricsResult := <-resultsCh
+		if metricsResult.err != nil {
+			log.Errorf("Stat -> queryMetric2 -> allResourcesRequestRate failed with: %s", metricsResult.err)
+			err = metricsResult.err
+		} else {
+			metrics = append(metrics, metricsResult.res...)
+		}
+	}
+
+	return promResult{res: metrics, err: err}
+}
+
 func (s *grpcServer) requestRate2(ctx context.Context, req *pb.MetricRequestV2) ([]pb.MetricSeriesV2, error) {
-	result := s.deployRequestRate(ctx, "") // TODO: populate namespace
+	var result promResult
+
+	switch req.Resource {
+	case "all":
+		result = s.allResourcesRequestRate(ctx, req.Namespace)
+	case "deployments":
+		result = s.deployRequestRate(ctx, req.Namespace)
+	case "pods":
+		result = s.podRequestRate(ctx, req.Namespace)
+	default:
+		result.err = errors.New("Invalid resource specified")
+	}
+
 	if result.err != nil {
 		return nil, result.err
 	}

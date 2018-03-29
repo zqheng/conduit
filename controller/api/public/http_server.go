@@ -3,7 +3,6 @@ package public
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	promApi "github.com/prometheus/client_golang/api"
@@ -96,16 +95,11 @@ func (h *handler) handleStat(w http.ResponseWriter, req *http.Request) {
 func (h *handler) handleStatV2(w http.ResponseWriter, req *http.Request) {
 	var protoRequest pb.MetricRequestV2
 
-	ns := req.URL.Query().Get("namespace") // remove for actual
-	protoRequest = pb.MetricRequestV2{
-		Metrics:   []pb.MetricName{pb.MetricName_REQUEST_RATE},
-		Namespace: ns,
+	err := httpRequestToProto(req, &protoRequest)
+	if err != nil {
+		writeErrorToHttpResponse(w, err)
+		return
 	}
-	// err := httpRequestToProto(req, &protoRequest)
-	// if err != nil {
-	// 	writeErrorToHttpResponse(w, err)
-	// 	return
-	// }
 
 	rsp, err := h.grpcServer.StatV2(req.Context(), &protoRequest)
 	if err != nil {
@@ -122,37 +116,19 @@ func (h *handler) handleStatV2(w http.ResponseWriter, req *http.Request) {
 
 func (h *handler) handleNewStat(w http.ResponseWriter, req *http.Request) {
 	ns := req.URL.Query().Get("namespace")
-
-	var err error
-	var result []byte
-
-	switch resource := req.URL.Query().Get("resource"); resource {
-	case "all":
-		rsp, err := h.getAllResourceMetrics(req.Context(), ns)
-		if err != nil {
-			writeErrorToHttpResponse(w, err)
-			return
-		}
-		result, err = json.Marshal(rsp)
-	case "deployments":
-		rsp, err := h.getDeploymentMetrics(req.Context(), ns)
-		if err != nil {
-			writeErrorToHttpResponse(w, err)
-			return
-		}
-		result, err = json.Marshal(rsp)
-	case "pods":
-		rsp, err := h.getPodMetrics(req.Context(), ns)
-		if err != nil {
-			writeErrorToHttpResponse(w, err)
-			return
-		}
-		result, err = json.Marshal(rsp)
-	default:
-		writeErrorToHttpResponse(w, errors.New("specify a resource type"))
+	resource := req.URL.Query().Get("resource")
+	protoRequest := pb.MetricRequestV2{
+		Metrics:   []pb.MetricName{pb.MetricName_REQUEST_RATE},
+		Namespace: ns,
+		Resource:  resource,
+	}
+	rsp, err := h.grpcServer.StatV2(req.Context(), &protoRequest)
+	if err != nil {
+		writeErrorToHttpResponse(w, err)
 		return
 	}
 
+	result, err := json.Marshal(rsp)
 	if err != nil {
 		writeErrorToHttpResponse(w, err)
 		return
@@ -160,6 +136,46 @@ func (h *handler) handleNewStat(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
+
+	// ns := req.URL.Query().Get("namespace")
+
+	// var err error
+	// var result []byte
+
+	// switch resource := req.URL.Query().Get("resource"); resource {
+	// case "all":
+	// 	rsp, err := h.getAllResourceMetrics(req.Context(), ns)
+	// 	if err != nil {
+	// 		writeErrorToHttpResponse(w, err)
+	// 		return
+	// 	}
+	// 	result, err = json.Marshal(rsp)
+	// case "deployments":
+	// 	rsp, err := h.getDeploymentMetrics(req.Context(), ns)
+	// 	if err != nil {
+	// 		writeErrorToHttpResponse(w, err)
+	// 		return
+	// 	}
+	// 	result, err = json.Marshal(rsp)
+	// case "pods":
+	// 	rsp, err := h.getPodMetrics(req.Context(), ns)
+	// 	if err != nil {
+	// 		writeErrorToHttpResponse(w, err)
+	// 		return
+	// 	}
+	// 	result, err = json.Marshal(rsp)
+	// default:
+	// 	writeErrorToHttpResponse(w, errors.New("specify a resource type"))
+	// 	return
+	// }
+
+	// if err != nil {
+	// 	writeErrorToHttpResponse(w, err)
+	// 	return
+	// }
+
+	// w.Header().Set("Content-Type", "application/json")
+	// w.Write(result)
 }
 
 func (h *handler) handleVersion(w http.ResponseWriter, req *http.Request) {

@@ -89,6 +89,7 @@ message MetricRequestV2 {
   map<string, string> filterBy = 4;
   bool summarize = 5;
   string namespace = 6;
+  string resource = 7;
 }
 message MetricResponseV2 {
   repeated MetricSeriesV2 metrics = 1;
