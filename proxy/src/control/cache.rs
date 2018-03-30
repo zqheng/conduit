@@ -1,4 +1,5 @@
 use std;
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::mem;
 
@@ -37,7 +38,7 @@ impl<T> Exists<T> {
 
 // ===== impl Cache =====
 
-impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
+impl<T> Cache<T> where T: Clone + Eq + std::hash::Hash {
     pub fn new() -> Self {
         Cache {
             values: HashSet::new(),
@@ -58,10 +59,10 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
               F: FnMut(T, CacheChange),
     {
         fn extend_inner<T, I, F>(values: &mut HashSet<T>, iter: I, on_change: &mut F)
-            where T: Copy + Eq + std::hash::Hash, I: Iterator<Item = T>, F: FnMut(T, CacheChange)
+            where T: Eq + std::hash::Hash + Clone, I: Iterator<Item = T>, F: FnMut(T, CacheChange)
         {
             for value in iter {
-                if values.insert(value) {
+                if values.insert(value.clone()) {
                     on_change(value, CacheChange::Insertion);
                 }
             }
@@ -71,20 +72,22 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
             extend_inner(&mut self.values, iter, on_change);
         } else {
             let to_insert = iter.collect::<HashSet<T>>();
-            extend_inner(&mut self.values, to_insert.iter().map(|value| *value), on_change);
+            extend_inner(&mut self.values, to_insert.iter().cloned(), on_change);
             self.retain(&to_insert, on_change);
         }
         self.reset_on_next_modification = false;
     }
 
-    pub fn remove<I, F>(&mut self, iter: I, on_change: &mut F)
-        where I: Iterator<Item = T>,
+    pub fn remove<I, F, Q>(&mut self, iter: I, on_change: &mut F)
+        where I: Iterator<Item = Q>,
+              T: Borrow<Q>,
+              Q: ::std::hash::Hash + Eq,
               F: FnMut(T, CacheChange)
     {
         if !self.reset_on_next_modification {
             for value in iter {
-                if self.values.remove(&value) {
-                    on_change(value, CacheChange::Removal);
+                if let Some(removed) = self.values.take(&value) {
+                    on_change(removed, CacheChange::Removal);
                 }
             }
         } else {
@@ -97,13 +100,15 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
         self.retain(&HashSet::new(), on_change)
     }
 
-    pub fn retain<F>(&mut self, to_retain: &HashSet<T>, mut on_change: F)
-        where F: FnMut(T, CacheChange)
+    pub fn retain<F, Q>(&mut self, to_retain: &HashSet<T>, mut on_change: F)
+        where F: FnMut(T, CacheChange),
+              T: Borrow<Q>,
+              Q: ::std::hash::Hash + Eq,
     {
         self.values.retain(|value| {
-            let retain = to_retain.contains(&value);
+            let retain = to_retain.contains(value.borrow());
             if !retain {
-                on_change(*value, CacheChange::Removal)
+                on_change(value.clone(), CacheChange::Removal)
             }
             retain
         });
@@ -197,3 +202,4 @@ mod tests {
         }
     }
 }
+
