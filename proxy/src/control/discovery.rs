@@ -474,8 +474,14 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |addr, change| Self::on_change(
+                        &mut self.txs,
+                        authority_for_logging,
+                        // Wrap the removed addr in a fake label to placate the
+                        // type system.
+                        addr,
+                        change
+                    ));
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -591,6 +597,12 @@ impl<'a> IntoIterator for &'a DstLabels {
             .chain(self.addr.iter())
             .map(borrow_pair)
 
+    }
+}
+
+impl DstLabels {
+    pub fn is_empty(&self) -> bool {
+        self.addr.is_empty() && self.set.is_empty()
     }
 }
 
