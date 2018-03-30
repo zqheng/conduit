@@ -1,12 +1,19 @@
+<<<<<<< HEAD
 use std;
+=======
+use std::borrow::Borrow;
+>>>>>>> Add destination labels extension to requests for discovered services
 use std::collections::{HashSet, VecDeque};
-use std::collections::hash_map::{Entry, HashMap};
+use std::collections::hash_map::{self, Entry, HashMap};
+use std::hash::{Hash, Hasher};
+use std::iter::{self, IntoIterator};
 use std::net::SocketAddr;
-use std::fmt;
-use std::mem;
+use std::sync::Arc;
+use std::{fmt, mem, ops};
 
 use futures::{Async, Future, Poll, Stream};
 use futures::sync::mpsc;
+use http;
 use tower::Service;
 use tower_h2::{HttpService, BoxBody, RecvBody};
 use tower_discover::{Change, Discover};
@@ -15,7 +22,10 @@ use tower_grpc as grpc;
 use fully_qualified_authority::FullyQualifiedAuthority;
 
 use conduit_proxy_controller_grpc::common::{Destination, TcpAddress};
-use conduit_proxy_controller_grpc::destination::Update as PbUpdate;
+use conduit_proxy_controller_grpc::destination::{
+    Update as PbUpdate,
+    WeightedAddr,
+};
 use conduit_proxy_controller_grpc::destination::update::Update as PbUpdate2;
 use conduit_proxy_controller_grpc::destination::client::{Destination as DestinationSvc};
 
@@ -55,10 +65,28 @@ pub struct DiscoveryWork<T: HttpService<ResponseBody = RecvBody>> {
     rx: mpsc::UnboundedReceiver<(FullyQualifiedAuthority, mpsc::UnboundedSender<Update>)>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DstLabels {
+    set: Arc<HashMap<String, String>>,
+    addr: Arc<HashMap<String, String>>,
+}
+
+/// A service that adds a label extension to all requests transiting it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LabelRequest<T> {
+    labels: Option<DstLabels>,
+    inner: T,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Labeled<T> {
+    metric_labels: DstLabels,
+    inner: T,
+}
+
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
-    addrs: Exists<Cache<SocketAddr>>,
+    addrs: Exists<Cache<Labeled<SocketAddr>>>,
     query: DestinationServiceQuery<T>,
-    txs: Vec<mpsc::UnboundedSender<Update>>,
 }
 
 enum Exists<T> {
@@ -127,7 +155,7 @@ enum RxError<T> {
 
 #[derive(Debug)]
 enum Update {
-    Insert(SocketAddr),
+    Insert(Labeled<SocketAddr>),
     Remove(SocketAddr),
 }
 
@@ -187,15 +215,15 @@ impl Discovery {
 
 // ==== impl Watch =====
 
-impl<B> Discover for Watch<B>
+impl<B, A> Discover for Watch<B>
 where
-    B: Bind,
+    B: Bind<Request = http::Request<A>>,
 {
     type Key = SocketAddr;
     type Request = B::Request;
     type Response = B::Response;
     type Error = B::Error;
-    type Service = B::Service;
+    type Service = LabelRequest<B::Service>;
     type DiscoverError = ();
 
     fn poll(&mut self) -> Poll<Change<Self::Key, Self::Service>, Self::DiscoverError> {
@@ -209,8 +237,10 @@ where
         };
 
         match update {
-            Update::Insert(addr) => {
-                let service = self.bind.bind(&addr).map_err(|_| ())?;
+            Update::Insert(Labeled { metric_labels, inner: addr }) => {
+                let service = self.bind.bind(&addr)
+                    .map(|svc| LabelRequest::new(metric_labels, svc))
+                    .map_err(|_| ())?;
 
                 Ok(Async::Ready(Change::Insert(addr, service)))
             }
@@ -290,8 +320,13 @@ where
                             // we may already know of some addresses here, so push
                             // them onto the new watch first
                             match set.addrs {
+<<<<<<< HEAD
                                 Exists::Yes(ref cache) => {
                                     for &addr in cache.values.iter() {
+=======
+                                Exists::Yes(ref mut addrs) => {
+                                    for addr in addrs.iter().cloned() {
+>>>>>>> Add destination labels extension to requests for discovered services
                                         tx.unbounded_send(Update::Insert(addr))
                                             .expect("unbounded_send does not fail");
                                     }
@@ -350,11 +385,14 @@ where
 
                 match poll_result {
                     Ok(Async::Ready(Some(update))) => match update.update {
-                        Some(PbUpdate2::Add(a_set)) =>
-                            set.add(
-                                auth,
-                                a_set.addrs.iter().filter_map(
-                                    |addr| addr.addr.clone().and_then(pb_to_sock_addr))),
+                        Some(PbUpdate2::Add(a_set)) => {
+                            let set_labels = Arc::new(a_set.metric_labels);
+                            let addrs = a_set.addrs.into_iter()
+                                    .filter_map(|addr| {
+                                        Labeled::from_pb(addr, &set_labels)
+                                    });
+                            set.add(auth, addrs)
+                        },
                         Some(PbUpdate2::Remove(r_set)) =>
                             set.remove(
                                 auth,
@@ -407,6 +445,7 @@ impl<T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>> Destination
 // ===== impl DestinationSet =====
 
 impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
+<<<<<<< HEAD
     fn reset_on_next_modification(&mut self) {
         match self.addrs {
             Exists::Yes(ref mut cache) => {
@@ -414,6 +453,27 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             },
             Exists::No |
             Exists::Unknown => (),
+=======
+    fn add<Addrs>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_add: Addrs)
+        where Addrs: Iterator<Item = Labeled<SocketAddr>>
+    {
+        let mut addrs = match self.addrs.take() {
+            Exists::Yes(addrs) => addrs,
+            Exists::Unknown | Exists::No => {
+                trace!("adding entries for {:?} that wasn't known to exist. Now assuming it does.",
+                       authority_for_logging);
+                HashSet::new()
+            },
+        };
+        for ref addr in addrs_to_add {
+            if addrs.insert(addr.clone()) {
+                trace!("update {:?} for {:?}", addr, authority_for_logging);
+                // retain is used to drop any senders that are dead
+                self.txs.retain(|tx| {
+                    tx.unbounded_send(Update::Insert(addr.clone())).is_ok()
+                });
+            }
+>>>>>>> Add destination labels extension to requests for discovered services
         }
     }
 
@@ -451,10 +511,17 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         trace!("no endpoints for {:?} that is known to {}", authority_for_logging,
                if exists { "exist" } else { "not exist" });
         match self.addrs.take() {
+<<<<<<< HEAD
             Exists::Yes(mut cache) => {
                 cache.clear(
                     &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
                                                         change));
+=======
+            Exists::Yes(addrs) => {
+                for addr in addrs {
+                    self.notify_of_removal(*addr, authority_for_logging)
+                }
+>>>>>>> Add destination labels extension to requests for discovered services
             },
             Exists::Unknown | Exists::No => (),
         };
@@ -598,7 +665,97 @@ where T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>,
     }
 }
 
-// ===== impl RxError =====
+// ===== impl DstLabels ====
+
+impl Hash for DstLabels {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for pair in self {
+            pair.hash(state);
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a DstLabels {
+    type Item = (&'a str, &'a str);
+    type IntoIter = iter::Map<
+        iter::Chain<
+            hash_map::Iter<'a, String, String>,
+            hash_map::Iter<'a, String, String>,
+        >,
+        fn((&'a String, &'a String)) -> (&'a str, &'a str)
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn borrow_pair<'a>((k, v): (&'a String, &'a String))
+            -> (&'a str, &'a str)
+        {
+            (k.as_ref(), v.as_ref())
+        }
+        self.set.iter()
+            .chain(self.addr.iter())
+            .map(borrow_pair)
+
+    }
+}
+
+
+impl Labeled<SocketAddr> {
+    fn from_pb(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
+               -> Option<Self> {
+        let inner = pb.addr.and_then(pb_to_sock_addr)?;
+        let metric_labels = DstLabels {
+            addr: Arc::new(pb.metric_labels),
+            set: set_labels.clone(),
+        };
+        Some(Labeled { inner, metric_labels })
+    }
+}
+
+impl<T> ops::Deref for Labeled<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> Borrow<T> for Labeled<T> {
+    fn borrow(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> LabelRequest<T> {
+    fn new(labels: DstLabels, inner: T) -> Self {
+        Self { labels: Some(labels), inner }
+    }
+
+    pub fn none(inner: T) -> Self {
+        Self { labels: None, inner }
+    }
+}
+
+impl<T, A> Service for LabelRequest<T>
+where
+    T: Service<Request=http::Request<A>>,
+{
+    type Request = T::Request;
+    type Response= T::Response;
+    type Error = T::Error;
+    type Future = T::Future;
+
+    fn poll_ready(&mut self) -> Poll<(), Self::Error> {
+        self.inner.poll_ready()
+    }
+
+    fn call(&mut self, req: Self::Request) -> Self::Future {
+        let mut req = req;
+        if let Some(ref labels) = self.labels {
+            req.extensions_mut().insert(labels.clone());
+        }
+        self.inner.call(req)
+    }
+
+}
 
 fn pb_to_sock_addr(pb: TcpAddress) -> Option<SocketAddr> {
     use conduit_proxy_controller_grpc::common::ip_address::Ip;
