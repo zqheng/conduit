@@ -16,6 +16,7 @@ use hyper::server::{
 };
 use indexmap::{IndexMap};
 
+use control::discovery;
 use ctx;
 use telemetry::event::Event;
 use super::latency::{BUCKET_BOUNDS, Histogram};
@@ -86,8 +87,9 @@ pub fn new(process: &Arc<ctx::Process>) -> (Aggregate, Serve) {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 struct RequestLabels {
-
-    outbound_labels: Option<OutboundLabels>,
+    // Additional labels identifying the destination service of an outbound
+    // request, provided by the Conduit control plane's service discovery.
+    outbound_labels: Option<discovery::DstLabels>,
 
     /// The value of the `:authority` (HTTP/2) or `Host` (HTTP/1.1) header of
     /// the request.
@@ -114,34 +116,6 @@ struct ResponseLabels {
 
     /// Was the response a success or failure?
     classification: Classification,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-// TODO: when #429 is done, this will no longer be dead code.
-#[allow(dead_code)]
-enum PodOwner {
-    /// The deployment to which this request is being sent.
-    Deployment(String),
-
-    /// The job to which this request is being sent.
-    Job(String),
-
-    /// The replica set to which this request is being sent.
-    ReplicaSet(String),
-
-    /// The replication controller to which this request is being sent.
-    ReplicationController(String),
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
-struct OutboundLabels {
-    /// The owner of the destination pod.
-    //  TODO: when #429 is done, this will no longer need to be an Option.
-    dst: Option<PodOwner>,
-
-    ///  The namespace to which this request is being sent (if
-    /// applicable).
-    namespace: Option<String>
 }
 
 // ===== impl Metrics =====
@@ -486,14 +460,7 @@ impl HyperService for Serve {
 
 impl<'a> RequestLabels {
     fn new(req: &ctx::http::Request) -> Self {
-        let outbound_labels = if req.server.proxy.is_outbound() {
-            Some(OutboundLabels {
-                // TODO: when #429 is done, add appropriate destination label.
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+        let outbound_labels = req.dst_labels.as_ref().cloned();
 
         let authority = req.uri
             .authority_part()
@@ -503,7 +470,6 @@ impl<'a> RequestLabels {
         RequestLabels {
             outbound_labels,
             authority,
-            ..Default::default()
         }
     }
 }
@@ -513,10 +479,7 @@ impl fmt::Display for RequestLabels {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "authority=\"{}\",", self.authority)?;
         if let Some(ref outbound) = self.outbound_labels {
-            write!(f, "direction=\"outbound\"{comma}{dst}",
-                comma = if !outbound.is_empty() { "," } else { "" },
-                dst = outbound
-            )?;
+            write!(f, "direction=\"outbound\"{}",outbound)?;
         } else {
             write!(f, "direction=\"inbound\"")?;
         }
@@ -527,45 +490,22 @@ impl fmt::Display for RequestLabels {
 }
 
 
-// ===== impl OutboundLabels =====
-
-impl OutboundLabels {
-    fn is_empty(&self) -> bool {
-        self.namespace.is_none() && self.dst.is_none()
-    }
-}
-
-impl fmt::Display for OutboundLabels {
+impl fmt::Display for discovery::DstLabels {
 
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            OutboundLabels { namespace: Some(ref ns), dst: Some(ref dst) } =>
-                 write!(f, "dst_namespace=\"{}\",dst_{}", ns, dst),
-            OutboundLabels { namespace: None, dst: Some(ref dst), } =>
-                write!(f, "dst_{}", dst),
-            OutboundLabels { namespace: Some(ref ns), dst: None, } =>
-                write!(f, "dst_namespace=\"{}\"", ns),
-            OutboundLabels { namespace: None, dst: None, } =>
-                write!(f, ""),
+        // format the labels with a comma preceeding them, since we expect
+        // to be called only by the `fmt::Display` impl for `RequestLabels`,
+        // which will output the direction label without a comma, and it makes
+        // the logic a little simpler here.
+        for (label, value) in self {
+            write!(f, ",{}=\"{}\"", label, value)?;
         }
+
+        Ok(())
     }
 
 }
 
-impl fmt::Display for PodOwner {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            PodOwner::Deployment(ref s) =>
-                write!(f, "deployment=\"{}\"", s),
-            PodOwner::Job(ref s) =>
-                write!(f, "job=\"{}\",", s),
-            PodOwner::ReplicaSet(ref s) =>
-                write!(f, "replica_set=\"{}\"", s),
-            PodOwner::ReplicationController(ref s) =>
-                write!(f, "replication_controller=\"{}\"", s),
-        }
-    }
-}
 
 // ===== impl ResponseLabels =====
 

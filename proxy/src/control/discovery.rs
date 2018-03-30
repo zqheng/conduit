@@ -698,6 +698,12 @@ impl<'a> IntoIterator for &'a DstLabels {
     }
 }
 
+impl DstLabels {
+    pub fn is_empty(&self) -> bool {
+        self.addr.is_empty() && self.set.is_empty()
+    }
+}
+
 
 impl Labeled<SocketAddr> {
     fn from_pb(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
