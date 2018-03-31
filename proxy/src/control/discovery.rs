@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-use std;
-=======
 use std::borrow::Borrow;
->>>>>>> Add destination labels extension to requests for discovered services
 use std::collections::{HashSet, VecDeque};
 use std::collections::hash_map::{self, Entry, HashMap};
 use std::hash::{Hash, Hasher};
@@ -87,6 +83,7 @@ pub struct Labeled<T> {
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
     addrs: Exists<Cache<Labeled<SocketAddr>>>,
     query: DestinationServiceQuery<T>,
+    txs: Vec<mpsc::UnboundedSender<Update>>,
 }
 
 enum Exists<T> {
@@ -156,7 +153,7 @@ enum RxError<T> {
 #[derive(Debug)]
 enum Update {
     Insert(Labeled<SocketAddr>),
-    Remove(SocketAddr),
+    Remove(Labeled<SocketAddr>),
 }
 
 /// Bind a `SocketAddr` with a protocol.
@@ -244,7 +241,7 @@ where
 
                 Ok(Async::Ready(Change::Insert(addr, service)))
             }
-            Update::Remove(addr) => Ok(Async::Ready(Change::Remove(addr))),
+            Update::Remove(addr) => Ok(Async::Ready(Change::Remove(*addr))),
         }
     }
 }
@@ -320,14 +317,9 @@ where
                             // we may already know of some addresses here, so push
                             // them onto the new watch first
                             match set.addrs {
-<<<<<<< HEAD
                                 Exists::Yes(ref cache) => {
-                                    for &addr in cache.values.iter() {
-=======
-                                Exists::Yes(ref mut addrs) => {
-                                    for addr in addrs.iter().cloned() {
->>>>>>> Add destination labels extension to requests for discovered services
-                                        tx.unbounded_send(Update::Insert(addr))
+                                    for addr in cache.values.iter() {
+                                        tx.unbounded_send(Update::Insert(addr.clone()))
                                             .expect("unbounded_send does not fail");
                                     }
                                 },
@@ -445,7 +437,6 @@ impl<T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>> Destination
 // ===== impl DestinationSet =====
 
 impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
-<<<<<<< HEAD
     fn reset_on_next_modification(&mut self) {
         match self.addrs {
             Exists::Yes(ref mut cache) => {
@@ -453,32 +444,11 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             },
             Exists::No |
             Exists::Unknown => (),
-=======
-    fn add<Addrs>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_add: Addrs)
-        where Addrs: Iterator<Item = Labeled<SocketAddr>>
-    {
-        let mut addrs = match self.addrs.take() {
-            Exists::Yes(addrs) => addrs,
-            Exists::Unknown | Exists::No => {
-                trace!("adding entries for {:?} that wasn't known to exist. Now assuming it does.",
-                       authority_for_logging);
-                HashSet::new()
-            },
-        };
-        for ref addr in addrs_to_add {
-            if addrs.insert(addr.clone()) {
-                trace!("update {:?} for {:?}", addr, authority_for_logging);
-                // retain is used to drop any senders that are dead
-                self.txs.retain(|tx| {
-                    tx.unbounded_send(Update::Insert(addr.clone())).is_ok()
-                });
-            }
->>>>>>> Add destination labels extension to requests for discovered services
         }
     }
 
     fn add<A>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_add: A)
-        where A: Iterator<Item = SocketAddr>
+        where A: Iterator<Item = Labeled<SocketAddr>>
     {
         let mut cache = match self.addrs.take() {
             Exists::Yes(mut cache) => cache,
@@ -492,14 +462,20 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
     }
 
     fn remove<A>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_remove: A)
-        where A: Iterator<Item = SocketAddr>
+        where A: Iterator<Item = SocketAddr>,
     {
         let cache = match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |addr, change| Self::on_change(
+                        &mut self.txs,
+                        authority_for_logging,
+                        // Wrap the removed addr in a fake label to placate the
+                        // type system.
+                        addr,
+                        change
+                    ));
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -511,17 +487,10 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         trace!("no endpoints for {:?} that is known to {}", authority_for_logging,
                if exists { "exist" } else { "not exist" });
         match self.addrs.take() {
-<<<<<<< HEAD
             Exists::Yes(mut cache) => {
                 cache.clear(
                     &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
                                                         change));
-=======
-            Exists::Yes(addrs) => {
-                for addr in addrs {
-                    self.notify_of_removal(*addr, authority_for_logging)
-                }
->>>>>>> Add destination labels extension to requests for discovered services
             },
             Exists::Unknown | Exists::No => (),
         };
@@ -534,9 +503,9 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
 
     fn on_change(txs: &mut Vec<mpsc::UnboundedSender<Update>>,
                  authority_for_logging: &FullyQualifiedAuthority,
-                 addr: SocketAddr,
+                 addr: Labeled<SocketAddr>,
                  change: CacheChange) {
-        let (update_str, update_constructor): (&'static str, fn(SocketAddr) -> Update) =
+        let (update_str, update_constructor): (&'static str, fn(Labeled<SocketAddr>) -> Update) =
             match change {
                 CacheChange::Insertion => ("insert", Update::Insert),
                 CacheChange::Removal => ("remove", Update::Remove),
@@ -544,7 +513,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
         // retain is used to drop any senders that are dead
         txs.retain(|tx| {
-            tx.unbounded_send(update_constructor(addr)).is_ok()
+            tx.unbounded_send(update_constructor(addr.clone())).is_ok()
         });
     }
 }
@@ -556,7 +525,7 @@ enum CacheChange {
     Removal,
 }
 
-impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
+impl<T> Cache<T> where T: Clone + Eq + Hash {
     fn new() -> Self {
         Cache {
             values: HashSet::new(),
@@ -569,10 +538,13 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
               F: FnMut(T, CacheChange),
     {
         fn extend_inner<T, I, F>(values: &mut HashSet<T>, iter: I, on_change: &mut F)
-            where T: Copy + Eq + std::hash::Hash, I: Iterator<Item = T>, F: FnMut(T, CacheChange)
+            where
+                T: Eq + Hash + Clone,
+                I: Iterator<Item = T>,
+                F: FnMut(T, CacheChange),
         {
             for value in iter {
-                if values.insert(value) {
+                if values.insert(value.clone()) {
                     on_change(value, CacheChange::Insertion);
                 }
             }
@@ -582,20 +554,22 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
             extend_inner(&mut self.values, iter, on_change);
         } else {
             let to_insert = iter.collect::<HashSet<T>>();
-            extend_inner(&mut self.values, to_insert.iter().map(|value| *value), on_change);
+            extend_inner(&mut self.values, to_insert.iter().cloned().map(|value| value), on_change);
             self.retain(&to_insert, on_change);
         }
         self.reset_on_next_modification = false;
     }
 
-    fn remove<I, F>(&mut self, iter: I, on_change: &mut F)
-        where I: Iterator<Item = T>,
+    fn remove<I, F, Q>(&mut self, iter: I, on_change: &mut F)
+        where I: Iterator<Item = Q>,
+              T: Borrow<Q>,
+              Q: Hash + Eq,
               F: FnMut(T, CacheChange)
     {
         if !self.reset_on_next_modification {
             for value in iter {
-                if self.values.remove(&value) {
-                    on_change(value, CacheChange::Removal);
+                if let Some(removed) = self.values.take(&value) {
+                    on_change(removed, CacheChange::Removal);
                 }
             }
         } else {
@@ -604,17 +578,25 @@ impl<T> Cache<T> where T: Clone + Copy + Eq + std::hash::Hash {
         self.reset_on_next_modification = false;
     }
 
-    fn clear<F>(&mut self, on_change: &mut F) where F: FnMut(T, CacheChange) {
+    fn clear<F>(&mut self, on_change: &mut F)
+    where
+        F: FnMut(T, CacheChange),
+        // T: Borrow<Q>,
+        // Q: Hash + Eq,
+    {
         self.retain(&HashSet::new(), on_change)
     }
 
-    fn retain<F>(&mut self, to_retain: &HashSet<T>, mut on_change: F)
-        where F: FnMut(T, CacheChange)
+    fn retain<F, Q>(&mut self, to_retain: &HashSet<T>, mut on_change: F)
+    where
+        F: FnMut(T, CacheChange),
+        T: Borrow<Q>,
+        Q: Hash + Eq,
     {
         self.values.retain(|value| {
-            let retain = to_retain.contains(&value);
+            let retain = to_retain.contains(value.borrow());
             if !retain {
-                on_change(*value, CacheChange::Removal)
+                on_change(value.clone(), CacheChange::Removal)
             }
             retain
         });
