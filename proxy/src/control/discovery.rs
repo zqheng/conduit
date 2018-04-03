@@ -477,8 +477,6 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
                     &mut |addr, change| Self::on_change(
                         &mut self.txs,
                         authority_for_logging,
-                        // Wrap the removed addr in a fake label to placate the
-                        // type system.
                         addr,
                         change
                     ));
