@@ -39,6 +39,7 @@ enum Classification {
 }
 
 
+
 // ===== impl RequestLabels =====
 
 impl<'a> RequestLabels {
@@ -71,6 +72,7 @@ impl fmt::Display for RequestLabels {
     }
 
 }
+
 
 
 // ===== impl ResponseLabels =====
@@ -112,24 +114,6 @@ impl fmt::Display for ResponseLabels {
         )?;
         if let Some(ref status) = self.grpc_status_code {
             write!(f, ",grpc_status_code=\"{}\"", status)?;
-        }
-
-        Ok(())
-    }
-
-}
-
-// ===== impl DstLabels =====
-
-impl fmt::Display for discovery::DstLabels {
-
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // format the labels with a comma preceeding them, since we expect
-        // to be called only by the `fmt::Display` impl for `RequestLabels`,
-        // which will output the direction label without a comma, and it makes
-        // the logic a little simpler here.
-        for (label, value) in self {
-            write!(f, ",dst_{}=\"{}\"", label, value)?;
         }
 
         Ok(())
