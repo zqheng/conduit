@@ -39,11 +39,10 @@ enum Classification {
 }
 
 
-
 // ===== impl RequestLabels =====
 
 impl<'a> RequestLabels {
-    pub fn new(req: &ctx::http::Request) -> Self {
+    fn new(req: &ctx::http::Request) -> Self {
         let outbound_labels = req.dst_labels.as_ref().cloned();
 
         let authority = req.uri
@@ -63,7 +62,7 @@ impl fmt::Display for RequestLabels {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "authority=\"{}\",", self.authority)?;
         if let Some(ref outbound) = self.outbound_labels {
-            write!(f, "direction=\"outbound\"{}",outbound)?;
+            write!(f, "direction=\"outbound\"{}", outbound)?;
         } else {
             write!(f, "direction=\"inbound\"")?;
         }
@@ -79,7 +78,7 @@ impl fmt::Display for RequestLabels {
 
 impl ResponseLabels {
 
-    pub fn new(rsp: &ctx::http::Response, grpc_status_code: Option<u32>) -> Self {
+    fn new(rsp: &ctx::http::Response, grpc_status_code: Option<u32>) -> Self {
         let request_labels = RequestLabels::new(&rsp.request);
         let classification = Classification::classify(rsp, grpc_status_code);
         ResponseLabels {
@@ -91,7 +90,7 @@ impl ResponseLabels {
     }
 
     /// Called when the response stream has failed.
-    pub fn fail(rsp: &ctx::http::Response) -> Self {
+    fn fail(rsp: &ctx::http::Response) -> Self {
         let request_labels = RequestLabels::new(&rsp.request);
         ResponseLabels {
             request_labels,

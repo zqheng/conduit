@@ -561,14 +561,15 @@ where T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>,
 impl DstLabels {
 
     #[inline]
-    fn new(set_labels: &HashMap<String, String>,
-           addr_labels: &HashMap<String, String>)
-           -> Self
+    fn new<I, S>(labels: I) -> Self
+    where
+        I: IntoIterator<Item=(S, S)>,
+        S: fmt::Display,
     {
         // this could also be a `fold`, or a `map` + `collect`, but the
         // mutable string + iteration is probably faster.
         let mut s = String::new();
-        for (k, v) in set_labels.iter().chain(addr_labels.iter()) {
+        for (k, v) in labels {
             write!(s, ",dst_{}=\"{}\"", k, v)
                 .expect("writing to string should not fail");
         }
@@ -589,8 +590,11 @@ impl Labeled<SocketAddr> {
     fn from_pb(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
                -> Option<Self> {
         let inner = pb.addr.and_then(pb_to_sock_addr)?;
-        let metric_labels =
-            Some(DstLabels::new(set_labels.borrow(), &pb.metric_labels));
+        let label_iter =
+            set_labels.as_ref()
+                .iter()
+                .chain(pb.metric_labels.iter());
+        let metric_labels =  Some(DstLabels::new(label_iter));
         Some(Labeled { metric_labels, inner, })
     }
 }
