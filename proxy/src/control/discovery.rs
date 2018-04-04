@@ -598,7 +598,11 @@ impl fmt::Display for DstLabels {
 
 }
 
+// ===== impl Labeled =====
+
 impl Labeled<SocketAddr> {
+
+    /// Construct a new labeled `SocketAddr `from a protobuf `WeightedAddr`.
     fn from_pb(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
                -> Option<Self> {
         let inner = pb.addr.and_then(pb_to_sock_addr)?;
@@ -613,10 +617,12 @@ impl Labeled<SocketAddr> {
 
 
 impl<T> Labeled<T> {
+    /// Wrap `inner` with no `metric_labels`.
     pub fn none(inner: T) -> Self {
         Self { metric_labels: None, inner }
     }
 
+    /// Construct a new `Labeled<U>` for `inner` with the same labels as `self`.
     fn label<U>(&self, inner: U) -> Labeled<U> {
         Labeled {
             metric_labels: self.metric_labels.as_ref().cloned(),
@@ -632,6 +638,11 @@ impl<T> ops::Deref for Labeled<T> {
     }
 }
 
+// By implementing `Borrow<SocketAddr>` for `Labeled<SocketAddr>`, we
+// can now treat a `SocketAddr` as a "borrowed form" of `Labeled<SocketAddr>`.
+// While this isn't technically what it is, that allows us to use an
+// un-labeled `SocketAddr` as a lookup key for `HashMap`s or `HashSet`s of
+// `Labeled<SocketAddr>`.
 impl<T> Borrow<T> for Labeled<T> {
     fn borrow(&self) -> &T {
         &self.inner

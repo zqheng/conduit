@@ -73,7 +73,6 @@ impl<'a> RequestLabels {
 }
 
 impl fmt::Display for RequestLabels {
-
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "authority=\"{}\",{}", self.authority, self.direction)?;
 
@@ -85,7 +84,6 @@ impl fmt::Display for RequestLabels {
 
         Ok(())
     }
-
 }
 
 
@@ -120,7 +118,6 @@ impl ResponseLabels {
 }
 
 impl fmt::Display for ResponseLabels {
-
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{},{},status_code=\"{}\"",
             self.request_labels,
@@ -136,7 +133,6 @@ impl fmt::Display for ResponseLabels {
 
         Ok(())
     }
-
 }
 
 // ===== impl Classification =====
@@ -169,14 +165,12 @@ impl Classification {
 }
 
 impl fmt::Display for Classification {
-
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             &Classification::Success => f.pad("classification=\"success\""),
             &Classification::Failure => f.pad("classification=\"failure\""),
         }
     }
-
 }
 
 
@@ -192,12 +186,10 @@ impl<'a> From<&'a ctx::Proxy> for Direction {
 }
 
 impl fmt::Display for Direction {
-
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             &Direction::Inbound => f.pad("direction=\"inbound\""),
             &Direction::Outbound => f.pad("direction=\"outbound\""),
         }
     }
-
 }
