@@ -5,8 +5,12 @@ use std::fmt;
 use control::discovery;
 use ctx;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct RequestLabels {
+
+    /// Was the request in the inbound or outbound direction?
+    direction: Direction,
+
     // Additional labels identifying the destination service of an outbound
     // request, provided by the Conduit control plane's service discovery.
     outbound_labels: Option<discovery::DstLabels>,
@@ -14,7 +18,9 @@ pub struct RequestLabels {
     /// The value of the `:authority` (HTTP/2) or `Host` (HTTP/1.1) header of
     /// the request.
     authority: String,
+
 }
+
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ResponseLabels {
@@ -32,17 +38,25 @@ pub struct ResponseLabels {
     classification: Classification,
 }
 
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 enum Classification {
     Success,
     Failure,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+enum Direction {
+    Inbound,
+    Outbound,
+}
+
+
 
 // ===== impl RequestLabels =====
 
 impl<'a> RequestLabels {
-    fn new(req: &ctx::http::Request) -> Self {
+    pub fn new(req: &ctx::http::Request) -> Self {
         let outbound_labels = req.dst_labels.as_ref().cloned();
 
         let authority = req.uri
@@ -51,6 +65,7 @@ impl<'a> RequestLabels {
             .unwrap_or_else(String::new);
 
         RequestLabels {
+            direction: req.server.proxy.as_ref().into(),
             outbound_labels,
             authority,
         }
@@ -60,11 +75,12 @@ impl<'a> RequestLabels {
 impl fmt::Display for RequestLabels {
 
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "authority=\"{}\",", self.authority)?;
+        write!(f, "authority=\"{}\",{}", self.authority, self.direction)?;
+
         if let Some(ref outbound) = self.outbound_labels {
-            write!(f, "direction=\"outbound\"{}", outbound)?;
-        } else {
-            write!(f, "direction=\"inbound\"")?;
+            // leading comma added between the direction label and the
+            // destination labels, if there are destination labels.
+            write!(f, ",{}", outbound)?;
         }
 
         Ok(())
@@ -78,7 +94,7 @@ impl fmt::Display for RequestLabels {
 
 impl ResponseLabels {
 
-    fn new(rsp: &ctx::http::Response, grpc_status_code: Option<u32>) -> Self {
+    pub fn new(rsp: &ctx::http::Response, grpc_status_code: Option<u32>) -> Self {
         let request_labels = RequestLabels::new(&rsp.request);
         let classification = Classification::classify(rsp, grpc_status_code);
         ResponseLabels {
@@ -90,7 +106,7 @@ impl ResponseLabels {
     }
 
     /// Called when the response stream has failed.
-    fn fail(rsp: &ctx::http::Response) -> Self {
+    pub fn fail(rsp: &ctx::http::Response) -> Self {
         let request_labels = RequestLabels::new(&rsp.request);
         ResponseLabels {
             request_labels,
@@ -111,7 +127,10 @@ impl fmt::Display for ResponseLabels {
             self.classification,
             self.status_code
         )?;
+
         if let Some(ref status) = self.grpc_status_code {
+            // leading comma added between the status code label and the
+            // gRPC status code labels, if there is a gRPC status code.
             write!(f, ",grpc_status_code=\"{}\"", status)?;
         }
 
@@ -155,6 +174,29 @@ impl fmt::Display for Classification {
         match self {
             &Classification::Success => f.pad("classification=\"success\""),
             &Classification::Failure => f.pad("classification=\"failure\""),
+        }
+    }
+
+}
+
+
+// ===== impl Direction =====
+
+impl<'a> From<&'a ctx::Proxy> for Direction {
+    fn from(proxy: &'a ctx::Proxy) -> Self {
+        match proxy {
+            &ctx::Proxy::Inbound(_) => Direction::Inbound,
+            &ctx::Proxy::Outbound(_) => Direction::Outbound,
+        }
+    }
+}
+
+impl fmt::Display for Direction {
+
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Direction::Inbound => f.pad("direction=\"inbound\""),
+            &Direction::Outbound => f.pad("direction=\"outbound\""),
         }
     }
 
