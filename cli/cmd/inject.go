@@ -159,6 +159,12 @@ func injectPodTemplateSpec(t *v1.PodTemplateSpec, controlPlaneDNSNameOverride, v
 				ContainerPort: int32(proxyMetricsPort),
 			},
 		},
+		VolumeMounts: []v1.VolumeMount{
+			v1.VolumeMount{
+				Name:      k8s.CertificateBundleName,
+				MountPath: "/certificates",
+			},
+		},
 		Env: []v1.EnvVar{
 			v1.EnvVar{Name: "CONDUIT_PROXY_LOG", Value: proxyLogLevel},
 			v1.EnvVar{
@@ -184,6 +190,19 @@ func injectPodTemplateSpec(t *v1.PodTemplateSpec, controlPlaneDNSNameOverride, v
 		},
 	}
 
+	volumeOptional := true
+	caBundleVolume := v1.Volume{
+		Name: k8s.CertificateBundleName,
+		VolumeSource: v1.VolumeSource{
+			ConfigMap: &v1.ConfigMapVolumeSource{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: k8s.CertificateBundleName,
+				},
+				Optional: &volumeOptional,
+			},
+		},
+	}
+
 	if t.Annotations == nil {
 		t.Annotations = make(map[string]string)
 	}
@@ -200,6 +219,7 @@ func injectPodTemplateSpec(t *v1.PodTemplateSpec, controlPlaneDNSNameOverride, v
 
 	t.Spec.Containers = append(t.Spec.Containers, sidecar)
 	t.Spec.InitContainers = append(t.Spec.InitContainers, initContainer)
+	t.Spec.Volumes = append(t.Spec.Volumes, caBundleVolume)
 
 	return true
 }

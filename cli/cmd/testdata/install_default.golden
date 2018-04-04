@@ -282,6 +282,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -302,6 +305,11 @@ spec:
             - NET_ADMIN
           privileged: false
       serviceAccount: conduit-controller
+      volumes:
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
 apiVersion: extensions/v1beta1
@@ -374,6 +382,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -394,6 +405,11 @@ spec:
             - NET_ADMIN
           privileged: false
       serviceAccount: conduit-ca
+      volumes:
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
 kind: Service
@@ -495,6 +511,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -514,6 +533,11 @@ spec:
             add:
             - NET_ADMIN
           privileged: false
+      volumes:
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
 kind: Service
@@ -610,6 +634,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -634,6 +661,10 @@ spec:
       - configMap:
           name: prometheus-config
         name: prometheus-config
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
 kind: ConfigMap
@@ -818,6 +849,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -857,6 +891,10 @@ spec:
             path: home.json
           name: grafana-dashboards
         name: grafana-dashboard-home
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
 kind: ConfigMap

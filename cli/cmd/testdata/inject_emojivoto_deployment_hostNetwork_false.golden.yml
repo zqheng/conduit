@@ -74,6 +74,9 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 2102
+        volumeMounts:
+        - mountPath: /certificates
+          name: conduit-ca-bundle
       initContainers:
       - args:
         - --incoming-proxy-port
@@ -93,5 +96,10 @@ spec:
             add:
             - NET_ADMIN
           privileged: false
+      volumes:
+      - configMap:
+          name: conduit-ca-bundle
+          optional: true
+        name: conduit-ca-bundle
 status: {}
 ---
