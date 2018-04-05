@@ -118,8 +118,9 @@ enum RxError<T> {
 
 #[derive(Debug)]
 enum Update {
-    Insert(Labeled<SocketAddr>),
-    Remove(Labeled<SocketAddr>),
+    Insert(SocketAddr),
+    Remove(SocketAddr),
+    ChangeMetadata(SocketAddr),
 }
 
 /// Bind a `SocketAddr` with a protocol.
@@ -206,10 +207,14 @@ where
                     .map(|svc| labeled_addr.label(svc))
                     .map_err(|_| ())?;
 
-                Ok(Async::Ready(Change::Insert(labeled_addr.inner(), service)))
-            }
-            Update::Remove(addr) =>
-                Ok(Async::Ready(Change::Remove(addr.inner()))),
+                Ok(Async::Ready(Change::Insert(addr, service)))
+            },
+            Update::ChangeMetadata(addr) => {
+                let service = self.bind.bind(&addr).map_err(|_| ())?;
+
+                Ok(Async::Ready(Change::Insert(addr, service)))
+            },
+            Update::Remove(addr) => Ok(Async::Ready(Change::Remove(addr))),
         }
     }
 }
@@ -500,6 +505,8 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             match change {
                 CacheChange::Insertion => ("insert", Update::Insert),
                 CacheChange::Removal => ("remove", Update::Remove),
+                CacheChange::Modification =>
+                    ("change metadata for", Update::ChangeMetadata),
             };
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
         // retain is used to drop any senders that are dead
