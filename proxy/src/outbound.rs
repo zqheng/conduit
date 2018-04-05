@@ -197,6 +197,9 @@ where
                 // circuit-breaking, this should be able to take care of itself,
                 // closing down when the connection is no longer usable.
                 let svc = bind.bind(&addr)
+                    // The controller was not consulted, so it has no labels
+                    // to add to the service.
+                    .map(discovery::Labeled::none)
                     .map_err(|_| BindError::External{ addr })?;
                 Ok(Async::Ready(Change::Insert(addr, svc)))
             },

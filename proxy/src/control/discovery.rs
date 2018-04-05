@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::collections::hash_map::{Entry, HashMap};
 use std::fmt::{self, Write};
@@ -66,6 +65,15 @@ pub struct DiscoveryWork<T: HttpService<ResponseBody = RecvBody>> {
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct DstLabels(Arc<str>);
 
+/// Any additional metadata describing a discovered service.
+#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
+pub struct Metadata {
+    /// A set of Prometheus metric labels describing the destination.
+    metric_labels: Option<DstLabels>,
+}
+
+/// Middleware that adds an extension containing an optional set of metric
+/// labels to requests.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Labeled<T> {
     metric_labels: Option<DstLabels>,
@@ -73,7 +81,7 @@ pub struct Labeled<T> {
 }
 
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
-    addrs: Exists<Cache<Labeled<SocketAddr>, ()>>,
+    addrs: Exists<Cache<SocketAddr, Metadata>>,
     query: Option<DestinationServiceQuery<T>>,
     txs: Vec<mpsc::UnboundedSender<Update>>,
 }
@@ -118,9 +126,9 @@ enum RxError<T> {
 
 #[derive(Debug)]
 enum Update {
-    Insert(SocketAddr),
+    Insert(SocketAddr, Metadata),
     Remove(SocketAddr),
-    ChangeMetadata(SocketAddr),
+    ChangeMetadata(SocketAddr, Metadata),
 }
 
 /// Bind a `SocketAddr` with a protocol.
@@ -202,15 +210,12 @@ where
         };
 
         match update {
-            Update::Insert(labeled_addr) => {
-                let service = self.bind.bind(labeled_addr.borrow())
-                    .map(|svc| labeled_addr.label(svc))
+            | Update::Insert(addr, meta)
+            // If metadata changes, rebind the service.
+            | Update::ChangeMetadata(addr, meta) => {
+                let service = self.bind.bind(&addr)
+                    .map(|svc| meta.label(svc))
                     .map_err(|_| ())?;
-
-                Ok(Async::Ready(Change::Insert(addr, service)))
-            },
-            Update::ChangeMetadata(addr) => {
-                let service = self.bind.bind(&addr).map_err(|_| ())?;
 
                 Ok(Async::Ready(Change::Insert(addr, service)))
             },
@@ -292,8 +297,12 @@ where
                             // them onto the new watch first
                             match set.addrs {
                                 Exists::Yes(ref cache) => {
-                                    for (&addr, _) in cache {
-                                        tx.unbounded_send(Update::Insert(addr))
+                                    for (&addr, meta) in cache {
+                                        let update = Update::Insert(
+                                            addr,
+                                            meta.clone()
+                                        );
+                                        tx.unbounded_send(update)
                                             .expect("unbounded_send does not fail");
                                     }
                                 },
@@ -406,10 +415,10 @@ impl<T> DestinationSet<T>
                     Some(PbUpdate2::Add(a_set)) => {
                         let set_labels = Arc::new(a_set.metric_labels);
                         let addrs = a_set.addrs.into_iter()
-                                .filter_map(|addr| {
-                                    Labeled::from_pb(addr, &set_labels)
-                                });
-                        set.add(auth, addrs)
+                            .filter_map(|pb|
+                                pb_to_addr_meta(pb, &set_labels)
+                            );
+                        self.add(auth, addrs)
                     },
                     Some(PbUpdate2::Remove(r_set)) =>
                         self.remove(
@@ -450,16 +459,22 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
     }
 
     fn add<A>(&mut self, authority_for_logging: &DnsNameAndPort, addrs_to_add: A)
-        where A: Iterator<Item = Labeled<SocketAddr>>
+        where A: Iterator<Item = (SocketAddr, Metadata)>
     {
         let mut cache = match self.addrs.take() {
             Exists::Yes(mut cache) => cache,
             Exists::Unknown | Exists::No => Cache::new(),
         };
         cache.update_union(
-            addrs_to_add.map(|a| (a, ())),
-            &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                change));
+            addrs_to_add,
+            &mut |(addr, meta), change| Self::on_change(
+                &mut self.txs,
+                authority_for_logging,
+                addr,
+                meta,
+                change,
+            )
+        );
         self.addrs = Exists::Yes(cache);
     }
 
@@ -470,8 +485,14 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |(addr, meta), change| Self::on_change(
+                        &mut self.txs,
+                        authority_for_logging,
+                        addr,
+                        meta,
+                        change,
+                    )
+                );
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -485,8 +506,14 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.clear(
-                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |(addr, meta), change| Self::on_change(
+                        &mut self.txs,
+                        authority_for_logging,
+                        addr,
+                        meta,
+                        change
+                    )
+                );
             },
             Exists::Unknown | Exists::No => (),
         };
@@ -499,19 +526,21 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
 
     fn on_change(txs: &mut Vec<mpsc::UnboundedSender<Update>>,
                  authority_for_logging: &DnsNameAndPort,
-                 addr: Labeled<SocketAddr>,
+                 addr: SocketAddr,
+                 meta: Metadata,
                  change: CacheChange) {
-        let (update_str, update_constructor): (&'static str, fn(Labeled<SocketAddr>) -> Update) =
+        let (update_str, update_constructor): (&'static str, fn(SocketAddr, Metadata) -> Update) =
             match change {
                 CacheChange::Insertion => ("insert", Update::Insert),
-                CacheChange::Removal => ("remove", Update::Remove),
+                CacheChange::Removal =>
+                    ("remove", |addr, _| Update::Remove(addr)),
                 CacheChange::Modification =>
                     ("change metadata for", Update::ChangeMetadata),
             };
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
         // retain is used to drop any senders that are dead
         txs.retain(|tx| {
-            tx.unbounded_send(update_constructor(addr.clone())).is_ok()
+            tx.unbounded_send(update_constructor(addr, meta.clone())).is_ok()
         });
     }
 }
@@ -603,57 +632,10 @@ impl fmt::Display for DstLabels {
 
 // ===== impl Labeled =====
 
-impl Labeled<SocketAddr> {
-
-    /// Construct a new labeled `SocketAddr `from a protobuf `WeightedAddr`.
-    fn from_pb(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
-               -> Option<Self> {
-        let inner = pb.addr.and_then(pb_to_sock_addr)?;
-        let label_iter =
-            set_labels.as_ref()
-                .iter()
-                .chain(pb.metric_labels.iter());
-        let metric_labels = DstLabels::new(label_iter);
-        Some(Labeled { metric_labels, inner, })
-    }
-}
-
 impl<T> Labeled<T> {
     /// Wrap `inner` with no `metric_labels`.
     pub fn none(inner: T) -> Self {
         Self { metric_labels: None, inner }
-    }
-
-    /// Returns the `inner` value, discarding the labels.
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-
-    /// Construct a new `Labeled<U>` for `inner` with the same labels as `self`.
-    fn label<U>(&self, inner: U) -> Labeled<U> {
-        Labeled {
-            metric_labels: self.metric_labels.as_ref().cloned(),
-            inner,
-        }
-    }
-}
-impl<T> Labeled<T>
-where
-    T: Copy,
-{
-    pub fn inner(&self) -> T {
-        self.inner
-    }
-}
-
-// By implementing `Borrow<SocketAddr>` for `Labeled<SocketAddr>`, we
-// can now treat a `SocketAddr` as a "borrowed form" of `Labeled<SocketAddr>`.
-// While this isn't technically what it is, that allows us to use an
-// un-labeled `SocketAddr` as a lookup key for `HashMap`s or `HashSet`s of
-// `Labeled<SocketAddr>`.
-impl<T> Borrow<T> for Labeled<T> {
-    fn borrow(&self) -> &T {
-        &self.inner
     }
 }
 
@@ -678,6 +660,33 @@ where
         self.inner.call(req)
     }
 
+}
+
+
+// ===== impl Metadata =====
+
+impl Metadata {
+    /// Construct a new `Labeled<U>` for `inner` with the same labels as `self`.
+    fn label<U>(&self, inner: U) -> Labeled<U> {
+        Labeled {
+            metric_labels: self.metric_labels.as_ref().cloned(),
+            inner,
+        }
+    }
+}
+
+/// Construct a new labeled `SocketAddr `from a protobuf `WeightedAddr`.
+fn pb_to_addr_meta(pb: WeightedAddr, set_labels: &Arc<HashMap<String, String>>)
+            -> Option<(SocketAddr, Metadata)> {
+    let addr = pb.addr.and_then(pb_to_sock_addr)?;
+    let label_iter =
+        set_labels.as_ref()
+            .iter()
+            .chain(pb.metric_labels.iter());
+    let meta = Metadata {
+        metric_labels: DstLabels::new(label_iter),
+    };
+    Some((addr, meta))
 }
 
 fn pb_to_sock_addr(pb: TcpAddress) -> Option<SocketAddr> {
