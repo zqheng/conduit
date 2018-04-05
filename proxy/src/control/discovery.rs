@@ -1,11 +1,10 @@
 use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::collections::hash_map::{Entry, HashMap};
-use std::fmt::Write;
+use std::fmt::{self, Write};
 use std::iter::IntoIterator;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{fmt, ops};
 
 
 use futures::{Async, Future, Poll, Stream};
@@ -207,9 +206,10 @@ where
                     .map(|svc| labeled_addr.label(svc))
                     .map_err(|_| ())?;
 
-                Ok(Async::Ready(Change::Insert(*labeled_addr, service)))
+                Ok(Async::Ready(Change::Insert(labeled_addr.inner(), service)))
             }
-            Update::Remove(addr) => Ok(Async::Ready(Change::Remove(*addr))),
+            Update::Remove(addr) =>
+                Ok(Async::Ready(Change::Remove(addr.inner()))),
         }
     }
 }
@@ -611,11 +611,15 @@ impl Labeled<SocketAddr> {
     }
 }
 
-
 impl<T> Labeled<T> {
     /// Wrap `inner` with no `metric_labels`.
     pub fn none(inner: T) -> Self {
         Self { metric_labels: None, inner }
+    }
+
+    /// Returns the `inner` value, discarding the labels.
+    pub fn into_inner(self) -> T {
+        self.inner
     }
 
     /// Construct a new `Labeled<U>` for `inner` with the same labels as `self`.
@@ -626,11 +630,12 @@ impl<T> Labeled<T> {
         }
     }
 }
-
-impl<T> ops::Deref for Labeled<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.inner
+impl<T> Labeled<T>
+where
+    T: Copy,
+{
+    pub fn inner(&self) -> T {
+        self.inner
     }
 }
 
