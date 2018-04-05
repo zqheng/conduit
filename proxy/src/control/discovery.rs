@@ -74,7 +74,7 @@ pub struct Labeled<T> {
 }
 
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
-    addrs: Exists<Cache<Labeled<SocketAddr>>>,
+    addrs: Exists<Cache<Labeled<SocketAddr>, ()>>,
     query: Option<DestinationServiceQuery<T>>,
     txs: Vec<mpsc::UnboundedSender<Update>>,
 }
@@ -286,8 +286,8 @@ where
                             // we may already know of some addresses here, so push
                             // them onto the new watch first
                             match set.addrs {
-                                Exists::Yes(ref mut cache) => {
-                                    for addr in cache.values().iter().cloned() {
+                                Exists::Yes(ref cache) => {
+                                    for (&addr, _) in cache.values().iter() {
                                         tx.unbounded_send(Update::Insert(addr))
                                             .expect("unbounded_send does not fail");
                                     }
@@ -452,8 +452,8 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             Exists::Unknown | Exists::No => Cache::new(),
         };
         cache.extend(
-            addrs_to_add,
-            &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+            addrs_to_add.map(|a| (a, ())),
+            &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
                                                 change));
         self.addrs = Exists::Yes(cache);
     }
@@ -465,12 +465,8 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |addr, change| Self::on_change(
-                        &mut self.txs,
-                        authority_for_logging,
-                        addr,
-                        change
-                    ));
+                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+                                                        change));
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -484,7 +480,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.clear(
-                    &mut |addr, change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
                                                         change));
             },
             Exists::Unknown | Exists::No => (),
