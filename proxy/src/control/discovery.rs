@@ -78,8 +78,6 @@ pub struct Metadata {
     metric_labels: Option<DstLabels>,
 }
 
-type LabelStoreError = futures_watch::StoreError<Option<DstLabels>>;
-
 /// Middleware that adds an extension containing an optional set of metric
 /// labels to requests.
 #[derive(Clone, Debug)]
@@ -192,13 +190,17 @@ impl Discovery {
             bind,
         }
     }
+}
 
+// ==== impl Watch =====
+
+impl<B> Watch<B> {
     fn update_metadata(&mut self,
                        addr: SocketAddr,
                        meta: Metadata)
                        -> Result<(), ()>
     {
-        if let Some(store) = self.metric_labels.get_mut(addr) {
+        if let Some(store) = self.metric_labels.get_mut(&addr) {
             store.store(meta.metric_labels)
                 .map_err(|e| {
                     error!("update_metadata: label store error: {:?}", e);
@@ -216,8 +218,6 @@ impl Discovery {
         }
     }
 }
-
-// ==== impl Watch =====
 
 impl<B, A> Discover for Watch<B>
 where
@@ -265,7 +265,7 @@ where
                     // the `Labeled` middleware using the watch handle
                     // still exists --- it will simply read the final
                     // value from the watch.
-                    self.metric_labels.remove(addr);
+                    self.metric_labels.remove(&addr);
                     return Ok(Async::Ready(Change::Remove(addr)));
                 },
             }
@@ -755,5 +755,3 @@ fn pb_to_sock_addr(pb: TcpAddress) -> Option<SocketAddr> {
         None => None,
     }
 }
-
-#[cfg]
