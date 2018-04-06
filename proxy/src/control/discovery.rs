@@ -78,6 +78,8 @@ pub struct Metadata {
     metric_labels: Option<DstLabels>,
 }
 
+type LabelStoreError = futures_watch::StoreError<Option<DstLabels>>;
+
 /// Middleware that adds an extension containing an optional set of metric
 /// labels to requests.
 #[derive(Clone, Debug)]
@@ -190,6 +192,48 @@ impl Discovery {
             bind,
         }
     }
+
+    fn update_metadata(&mut self,
+                       addr: SocketAddr,
+                       meta: Metadata)
+                       -> Result<(), ()>
+    {
+        match self.metric_labels.entry(addr) {
+            // Handle changes in metadata (currently, destination
+            // labels by updating our `Store` for that service's set of
+            // labels.
+            Entry::Occupied(mut entry) => {
+                let canceled = entry.get_mut()
+                    .poll_cancel()
+                    .map_err(|_| {
+                        error!("update_metadata: label poll_cancel error");
+                    });
+                if canceled?.is_ready() {
+                    // If poll_cancel() returns `Ready`, then the
+                    // service bound to that address has been
+                    // dropped and we can safely remove it.
+                    let _ = entry.remove_entry();
+                    return Ok(());
+                };
+                // otherwise, update the store, dropping the previous value.
+                let _ = entry.get_mut().store(meta.metric_labels)
+                    .map_err(|e| {
+                        error!("update_metadata: label store error: {:?}", e);
+                    })?;
+                Ok(())
+            },
+            Entry::Vacant(_) => {
+                // The store has already been removed, so nobody cares about
+                // the metadata change.
+                warn!(
+                    "update_metadata: ignoring ChangeMetadata for {:?},
+                     the service no longer exists.",
+                    addr
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 // ==== impl Watch =====
@@ -231,48 +275,16 @@ where
 
                     return Ok(Async::Ready(Change::Insert(addr, service)))
                 },
-                Update::ChangeMetadata(addr, meta) => match self
-                    .metric_labels
-                    .entry(addr)
-                {
-                    // Handle changes in metadata (currently, destination
-                    // labels by updating our `Store` for that service's set of
-                    // labels.
-                    Entry::Occupied(mut entry) => {
-                        let canceled = entry.get_mut()
-                            .poll_cancel()
-                            .map_err(|e| {
-                                error!("Watch: label poll_cancel: {:?}", e);
-                            });
-                        if canceled?.is_ready() {
-                            // If poll_cancel() returns `Ready`, then the
-                            // service bound to that address has been
-                            // dropped and we can safely remove it.
-                            let _ = entry.remove_entry();
-                            continue;
-                        };
-                        // otherwise, update the store, dropping the previous value.
-                        let _ = entry.get_mut().store(meta.metric_labels)
-                            .map_err(|e| {
-                                error!("Watch: label store errored: {:?}", e);
-                            })?;
-                    },
-                    Entry::Vacant(_) => {
-                        // The store has already been removed, so nobody cares about
-                        // the metadata change.
-                        warn!(
-                            "Watch: ignoring ChangeMetadata for dropped service {:?}",
-                            addr
-                        );
-                    }
-                    // We have nothing to return, so continue with the loop.
-                    // Alternatively, rather than wrapping the method body in
-                    // a loop, we could return `NotReady` here, but we'd have
-                    // to unpark the task. This way, we'll just poll `rx` again,
-                    // (likely returning `NotReady`) and we'll get notified again
-                    // when `rx` is ready...
-                }
+                Update::ChangeMetadata(addr, meta) => {
+                    // Update metadata and continue polling `rx`.
+                    self.update_metadata(addr, meta)?;
+                },
                 Update::Remove(addr) => {
+                    // NOTE: we don't remove the `store` for the removed
+                    // service's labels from `metrics_labels` here, since the
+                    // balancer may not have removed it yet. If we see another
+                    // ChangeMetadata event for that watch and it's cancelled,
+                    // we'll remove it then.
                     return Ok(Async::Ready(Change::Remove(addr)));
                 },
             }
