@@ -204,8 +204,8 @@ impl<B> Watch<B> {
             store.store(meta.metric_labels)
                 .map_err(|e| {
                     error!("update_metadata: label store error: {:?}", e);
-                })?;
-            Ok(())
+                })
+                .map(|_| ())
         } else {
             // The store has already been removed, so nobody cares about
             // the metadata change.
@@ -234,12 +234,7 @@ where
         loop {
             let up = self.rx.poll();
             trace!("watch: {:?}", up);
-            let update = match up {
-                Ok(Async::Ready(Some(update))) => update,
-                Ok(Async::Ready(None)) => unreachable!(),
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Err(_) => return Err(()),
-            };
+            let update = try_ready!(up).expect("discovery stream must be infinite");
 
             match update {
                 Update::Insert(addr, meta) => {
