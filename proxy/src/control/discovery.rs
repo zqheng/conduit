@@ -198,40 +198,21 @@ impl Discovery {
                        meta: Metadata)
                        -> Result<(), ()>
     {
-        match self.metric_labels.entry(addr) {
-            // Handle changes in metadata (currently, destination
-            // labels by updating our `Store` for that service's set of
-            // labels.
-            Entry::Occupied(mut entry) => {
-                let canceled = entry.get_mut()
-                    .poll_cancel()
-                    .map_err(|_| {
-                        error!("update_metadata: label poll_cancel error");
-                    });
-                if canceled?.is_ready() {
-                    // If poll_cancel() returns `Ready`, then the
-                    // service bound to that address has been
-                    // dropped and we can safely remove it.
-                    let _ = entry.remove_entry();
-                    return Ok(());
-                };
-                // otherwise, update the store, dropping the previous value.
-                let _ = entry.get_mut().store(meta.metric_labels)
-                    .map_err(|e| {
-                        error!("update_metadata: label store error: {:?}", e);
-                    })?;
-                Ok(())
-            },
-            Entry::Vacant(_) => {
-                // The store has already been removed, so nobody cares about
-                // the metadata change.
-                warn!(
-                    "update_metadata: ignoring ChangeMetadata for {:?},
-                     the service no longer exists.",
-                    addr
-                );
-                Ok(())
-            }
+        if let Some(store) = self.metric_labels.get_mut(addr) {
+            store.store(meta.metric_labels)
+                .map_err(|e| {
+                    error!("update_metadata: label store error: {:?}", e);
+                })?;
+            Ok(())
+        } else {
+            // The store has already been removed, so nobody cares about
+            // the metadata change.
+            warn!(
+                "update_metadata: ignoring ChangeMetadata for {:?},
+                 the service no longer exists.",
+                addr
+            );
+            Ok(())
         }
     }
 }
@@ -280,11 +261,11 @@ where
                     self.update_metadata(addr, meta)?;
                 },
                 Update::Remove(addr) => {
-                    // NOTE: we don't remove the `store` for the removed
-                    // service's labels from `metrics_labels` here, since the
-                    // balancer may not have removed it yet. If we see another
-                    // ChangeMetadata event for that watch and it's cancelled,
-                    // we'll remove it then.
+                    // it's safe to drop the store handle here, even if
+                    // the `Labeled` middleware using the watch handle
+                    // still exists --- it will simply read the final
+                    // value from the watch.
+                    self.metric_labels.remove(addr);
                     return Ok(Async::Ready(Change::Remove(addr)));
                 },
             }
@@ -774,3 +755,5 @@ fn pb_to_sock_addr(pb: TcpAddress) -> Option<SocketAddr> {
         None => None,
     }
 }
+
+#[cfg]
