@@ -23,14 +23,13 @@ use conduit_proxy_controller_grpc::destination::{
 };
 use conduit_proxy_controller_grpc::destination::update::Update as PbUpdate2;
 use conduit_proxy_controller_grpc::destination::client::{Destination as DestinationSvc};
-use transport::DnsNameAndPort;
 
 use control::cache::{Cache, CacheChange, Exists};
 
 /// A handle to start watching a destination for address changes.
 #[derive(Clone, Debug)]
 pub struct Discovery {
-    tx: mpsc::UnboundedSender<(DnsNameAndPort, mpsc::UnboundedSender<Update>)>,
+    tx: mpsc::UnboundedSender<(FullyQualifiedAuthority, mpsc::UnboundedSender<Update>)>,
 }
 
 /// A `tower_discover::Discover`, given to a `tower_balance::Balance`.
@@ -43,23 +42,24 @@ pub struct Watch<B> {
 /// A background handle to eventually bind on the controller thread.
 #[derive(Debug)]
 pub struct Background {
-    rx: mpsc::UnboundedReceiver<(DnsNameAndPort, mpsc::UnboundedSender<Update>)>,
-    default_destination_namespace: String,
+    rx: mpsc::UnboundedReceiver<(FullyQualifiedAuthority, mpsc::UnboundedSender<Update>)>,
 }
 
 /// A future returned from `Background::work()`, doing the work of talking to
 /// the controller destination API.
 // TODO: debug impl
 pub struct DiscoveryWork<T: HttpService<ResponseBody = RecvBody>> {
-    default_destination_namespace: String,
-    destinations: HashMap<DnsNameAndPort, DestinationSet<T>>,
+    destinations: HashMap<
+        FullyQualifiedAuthority,
+        DestinationSet<T>
+    >,
     /// A queue of authorities that need to be reconnected.
-    reconnects: VecDeque<DnsNameAndPort>,
+    reconnects: VecDeque<FullyQualifiedAuthority>,
     /// The Destination.Get RPC client service.
     /// Each poll, records whether the rpc service was till ready.
     rpc_ready: bool,
     /// A receiver of new watch requests.
-    rx: mpsc::UnboundedReceiver<(DnsNameAndPort, mpsc::UnboundedSender<Update>)>,
+    rx: mpsc::UnboundedReceiver<(FullyQualifiedAuthority, mpsc::UnboundedSender<Update>)>,
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
@@ -82,7 +82,7 @@ pub struct Labeled<T> {
 
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
     addrs: Exists<Cache<SocketAddr, Metadata>>,
-    query: Option<DestinationServiceQuery<T>>,
+    query: DestinationServiceQuery<T>,
     txs: Vec<mpsc::UnboundedSender<Update>>,
 }
 
@@ -155,7 +155,7 @@ pub trait Bind {
 ///
 /// The `Discovery` is used by a listener, the `Background` is consumed
 /// on the controller thread.
-pub fn new(default_destination_namespace: String) -> (Discovery, Background) {
+pub fn new() -> (Discovery, Background) {
     let (tx, rx) = mpsc::unbounded();
     (
         Discovery {
@@ -163,7 +163,6 @@ pub fn new(default_destination_namespace: String) -> (Discovery, Background) {
         },
         Background {
             rx,
-            default_destination_namespace,
         },
     )
 }
@@ -172,7 +171,7 @@ pub fn new(default_destination_namespace: String) -> (Discovery, Background) {
 
 impl Discovery {
     /// Start watching for address changes for a certain authority.
-    pub fn resolve<B>(&self, authority: &DnsNameAndPort, bind: B) -> Watch<B> {
+    pub fn resolve<B>(&self, authority: &FullyQualifiedAuthority, bind: B) -> Watch<B> {
         trace!("resolve; authority={:?}", authority);
         let (tx, rx) = mpsc::unbounded();
         self.tx
@@ -210,15 +209,16 @@ where
         };
 
         match update {
-            | Update::Insert(addr, meta)
-            // If metadata changes, rebind the service.
-            | Update::ChangeMetadata(addr, meta) => {
+            | Update::Insert(addr, meta) => {
                 let service = self.bind.bind(&addr)
                     .map(|svc| meta.label(svc))
                     .map_err(|_| ())?;
 
                 Ok(Async::Ready(Change::Insert(addr, service)))
             },
+            // TODO: handle metadata changes by changing the labeling
+            // middleware to hold a `futures-watch::Watch` on the label value,
+            // so it can be updated.
             Update::Remove(addr) => Ok(Async::Ready(Change::Remove(addr))),
         }
     }
@@ -233,7 +233,6 @@ impl Background {
           T::Error: fmt::Debug,
     {
         DiscoveryWork {
-            default_destination_namespace: self.default_destination_namespace,
             destinations: HashMap::new(),
             reconnects: VecDeque::new(),
             rpc_ready: false,
@@ -312,11 +311,7 @@ where
                         }
                         Entry::Vacant(vac) => {
                             let query =
-                                DestinationServiceQuery::connect_maybe(
-                                    &self.default_destination_namespace,
-                                    client,
-                                    vac.key(),
-                                    "connect");
+                                DestinationServiceQuery::connect(client, vac.key(), "connect");
                             vac.insert(DestinationSet {
                                 addrs: Exists::Unknown,
                                 query,
@@ -341,11 +336,7 @@ where
 
         while let Some(auth) = self.reconnects.pop_front() {
             if let Some(set) = self.destinations.get_mut(&auth) {
-                set.query = DestinationServiceQuery::connect_maybe(
-                    &self.default_destination_namespace,
-                    client,
-                    &auth,
-                    "reconnect");
+                set.query = DestinationServiceQuery::connect(client, &auth, "reconnect");
                 return true;
             } else {
                 trace!("reconnect no longer needed: {:?}", auth);
@@ -356,17 +347,51 @@ where
 
     fn poll_destinations(&mut self) {
         for (auth, set) in &mut self.destinations {
-            set.query = match set.query.take() {
-                Some(DestinationServiceQuery::ConnectedOrConnecting{ rx }) => {
-                    let new_query = set.poll_destination(auth, rx);
-                    if let DestinationServiceQuery::NeedsReconnect = new_query {
-                        set.reset_on_next_modification();
-                        self.reconnects.push_back(auth.clone());
+            let needs_reconnect = 'set: loop {
+                let poll_result = match set.query {
+                    DestinationServiceQuery::NeedsReconnect => {
+                        continue;
+                    },
+                    DestinationServiceQuery::ConnectedOrConnecting{ ref mut rx } => {
+                        rx.poll()
                     }
-                    Some(new_query)
-                },
-                query => query,
+                };
+
+                match poll_result {
+                    Ok(Async::Ready(Some(update))) => match update.update {
+                        Some(PbUpdate2::Add(a_set)) =>
+                            set.add(
+                                auth,
+                                a_set.addrs.iter().filter_map(
+                                    |addr| addr.addr.clone().and_then(pb_to_sock_addr))),
+                        Some(PbUpdate2::Remove(r_set)) =>
+                            set.remove(
+                                auth,
+                                r_set.addrs.iter().filter_map(|addr| pb_to_sock_addr(addr.clone()))),
+                        Some(PbUpdate2::NoEndpoints(no_endpoints)) =>
+                            set.no_endpoints(auth, no_endpoints.exists),
+                        None => (),
+                    },
+                    Ok(Async::Ready(None)) => {
+                        trace!(
+                            "Destination.Get stream ended for {:?}, must reconnect",
+                            auth
+                        );
+                        break 'set true;
+                    }
+                    Ok(Async::NotReady) => break 'set false,
+                    Err(err) => {
+                        warn!("Destination.Get stream errored for {:?}: {:?}", auth, err);
+                        break 'set true;
+                    }
+                }
+
             };
+            if needs_reconnect {
+                set.query = DestinationServiceQuery::NeedsReconnect;
+                set.reset_on_next_modification();
+                self.reconnects.push_back(FullyQualifiedAuthority::clone(auth));
+            }
         }
     }
 }
@@ -375,77 +400,20 @@ where
 // ===== impl DestinationServiceQuery =====
 
 impl<T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>> DestinationServiceQuery<T> {
-    // Initiates a query `query` to the Destination service and returns it as `Some(query)` if the
-    // given authority's host is of a form suitable for using to query the Destination service.
-    // Otherwise, returns `None`.
-    fn connect_maybe(
-        default_destination_namespace: &str,
-        client: &mut T,
-        auth: &DnsNameAndPort,
-        connect_or_reconnect: &str)
-        -> Option<Self>
-    {
+    fn connect(client: &mut T, auth: &FullyQualifiedAuthority, connect_or_reconnect: &str) -> Self {
         trace!("DestinationServiceQuery {} {:?}", connect_or_reconnect, auth);
-        FullyQualifiedAuthority::normalize(auth, default_destination_namespace)
-            .map(|auth| {
-                let req = Destination {
-                    scheme: "k8s".into(),
-                    path: auth.without_trailing_dot().to_owned(),
-                };
-                // TODO: Can grpc::Request::new be removed?
-                let mut svc = DestinationSvc::new(client.lift_ref());
-                let response = svc.get(grpc::Request::new(req));
-                DestinationServiceQuery::ConnectedOrConnecting { rx: UpdateRx::Waiting(response) }
-            })
+        let req = Destination {
+            scheme: "k8s".into(),
+            path: auth.without_trailing_dot().as_str().into(),
+        };
+        // TODO: Can grpc::Request::new be removed?
+        let mut svc = DestinationSvc::new(client.lift_ref());
+        let response = svc.get(grpc::Request::new(req));
+        DestinationServiceQuery::ConnectedOrConnecting { rx: UpdateRx::Waiting(response) }
     }
 }
 
 // ===== impl DestinationSet =====
-
-impl<T> DestinationSet<T>
-    where T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>,
-          T::Error: fmt::Debug
-{
-    fn poll_destination(&mut self, auth: &DnsNameAndPort, mut rx: UpdateRx<T>)
-                        -> DestinationServiceQuery<T>
-    {
-        loop {
-            match rx.poll() {
-                Ok(Async::Ready(Some(update))) => match update.update {
-                    Some(PbUpdate2::Add(a_set)) => {
-                        let set_labels = Arc::new(a_set.metric_labels);
-                        let addrs = a_set.addrs.into_iter()
-                            .filter_map(|pb|
-                                pb_to_addr_meta(pb, &set_labels)
-                            );
-                        self.add(auth, addrs)
-                    },
-                    Some(PbUpdate2::Remove(r_set)) =>
-                        self.remove(
-                            auth,
-                            r_set.addrs.iter().filter_map(|addr| pb_to_sock_addr(addr.clone()))),
-                    Some(PbUpdate2::NoEndpoints(no_endpoints)) =>
-                        self.no_endpoints(auth, no_endpoints.exists),
-                    None => (),
-                },
-                Ok(Async::Ready(None)) => {
-                    trace!(
-                        "Destination.Get stream ended for {:?}, must reconnect",
-                        auth
-                    );
-                    return DestinationServiceQuery::NeedsReconnect;
-                },
-                Ok(Async::NotReady) => {
-                    return DestinationServiceQuery::ConnectedOrConnecting { rx };
-                },
-                Err(err) => {
-                    warn!("Destination.Get stream errored for {:?}: {:?}", auth, err);
-                    return DestinationServiceQuery::NeedsReconnect;
-                }
-            };
-        }
-    }
-}
 
 impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
     fn reset_on_next_modification(&mut self) {
@@ -458,41 +426,29 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         }
     }
 
-    fn add<A>(&mut self, authority_for_logging: &DnsNameAndPort, addrs_to_add: A)
-        where A: Iterator<Item = (SocketAddr, Metadata)>
+    fn add<A>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_add: A)
+        where A: Iterator<Item = SocketAddr>
     {
         let mut cache = match self.addrs.take() {
             Exists::Yes(mut cache) => cache,
             Exists::Unknown | Exists::No => Cache::new(),
         };
         cache.update_union(
-            addrs_to_add,
-            &mut |(addr, meta), change| Self::on_change(
-                &mut self.txs,
-                authority_for_logging,
-                addr,
-                meta,
-                change,
-            )
-        );
+            addrs_to_add.map(|a| (a, ())),
+            &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+                                                change));
         self.addrs = Exists::Yes(cache);
     }
 
-    fn remove<A>(&mut self, authority_for_logging: &DnsNameAndPort, addrs_to_remove: A)
+    fn remove<A>(&mut self, authority_for_logging: &FullyQualifiedAuthority, addrs_to_remove: A)
         where A: Iterator<Item = SocketAddr>
     {
         let cache = match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |(addr, meta), change| Self::on_change(
-                        &mut self.txs,
-                        authority_for_logging,
-                        addr,
-                        meta,
-                        change,
-                    )
-                );
+                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+                                                        change));
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -500,20 +456,14 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         self.addrs = Exists::Yes(cache);
     }
 
-    fn no_endpoints(&mut self, authority_for_logging: &DnsNameAndPort, exists: bool) {
+    fn no_endpoints(&mut self, authority_for_logging: &FullyQualifiedAuthority, exists: bool) {
         trace!("no endpoints for {:?} that is known to {}", authority_for_logging,
                if exists { "exist" } else { "not exist" });
         match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.clear(
-                    &mut |(addr, meta), change| Self::on_change(
-                        &mut self.txs,
-                        authority_for_logging,
-                        addr,
-                        meta,
-                        change
-                    )
-                );
+                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
+                                                        change));
             },
             Exists::Unknown | Exists::No => (),
         };
@@ -525,17 +475,23 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
     }
 
     fn on_change(txs: &mut Vec<mpsc::UnboundedSender<Update>>,
-                 authority_for_logging: &DnsNameAndPort,
+                 authority_for_logging: &FullyQualifiedAuthority,
                  addr: SocketAddr,
                  meta: Metadata,
                  change: CacheChange) {
-        let (update_str, update_constructor): (&'static str, fn(SocketAddr, Metadata) -> Update) =
+        if let CacheChange::Modification = change {
+            // Skip `Modification` cache change events entirely until metadata
+            // changes occur, and are handled correctly.
+            return;
+        }
+        let (update_str, update_constructor): (&'static str, fn(SocketAddr) -> Update) =
             match change {
                 CacheChange::Insertion => ("insert", Update::Insert),
-                CacheChange::Removal =>
-                    ("remove", |addr, _| Update::Remove(addr)),
-                CacheChange::Modification =>
-                    ("change metadata for", Update::ChangeMetadata),
+                CacheChange::Removal => ("remove", Update::Remove),
+                CacheChange::Modification => {
+                    // TODO: generate `ChangeMetadata` events.
+                    unreachable!();
+                }
             };
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
         // retain is used to drop any senders that are dead
