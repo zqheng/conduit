@@ -26,6 +26,8 @@ use conduit_proxy_controller_grpc::destination::client::{Destination as Destinat
 
 use control::cache::{Cache, CacheChange, Exists};
 
+use ::telemetry::metrics::prometheus::Labeled;
+
 /// A handle to start watching a destination for address changes.
 #[derive(Clone, Debug)]
 pub struct Discovery {
@@ -76,14 +78,6 @@ pub struct DstLabels(Arc<str>);
 pub struct Metadata {
     /// A set of Prometheus metric labels describing the destination.
     metric_labels: Option<DstLabels>,
-}
-
-/// Middleware that adds an extension containing an optional set of metric
-/// labels to requests.
-#[derive(Clone, Debug)]
-pub struct Labeled<T> {
-    metric_labels: Option<futures_watch::Watch<Option<DstLabels>>>,
-    inner: T,
 }
 
 struct DestinationSet<T: HttpService<ResponseBody = RecvBody>> {
@@ -256,7 +250,7 @@ where
                     self.update_metadata(addr, meta)?;
                 },
                 Update::Remove(addr) => {
-                    // it's safe to drop the store handle here, even if
+                    // It's safe to drop the store handle here, even if
                     // the `Labeled` middleware using the watch handle
                     // still exists --- it will simply read the final
                     // value from the watch.
@@ -547,7 +541,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
                     ("change metadata for", Update::ChangeMetadata),
             };
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
-        // retain is used to drop any senders that are dead
+        // etain is used to drop any senders that are dead
         txs.retain(|tx| {
             tx.unbounded_send(update_constructor(addr, meta.clone())).is_ok()
         });
@@ -600,8 +594,6 @@ where T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>,
 // ===== impl DstLabels ====
 
 impl DstLabels {
-
-    #[inline]
     fn new<I, S>(labels: I) -> Option<Self>
     where
         I: IntoIterator<Item=(S, S)>,
@@ -610,11 +602,11 @@ impl DstLabels {
         let mut labels = labels.into_iter();
 
         if let Some((k, v)) = labels.next() {
-            // format the first label pair without a leading comma, since we
+            // Format the first label pair without a leading comma, since we
             // don't know where it is in the output labels at this point.
             let mut s = format!("dst_{}=\"{}\"", k, v);
 
-            // format subsequent label pairs with leading commas, since
+            // Format subsequent label pairs with leading commas, since
             // we know that we already formatted the first label pair.
             for (k, v) in labels {
                 write!(s, ",dst_{}=\"{}\"", k, v)
@@ -623,66 +615,16 @@ impl DstLabels {
 
             Some(DstLabels(Arc::from(s)))
         } else {
-            // the iterator is empty; return none
+            // The iterator is empty; return None
             None
         }
-
     }
-
 }
 
 impl fmt::Display for DstLabels {
-
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
-
-}
-
-// ===== impl Labeled =====
-
-impl<T> Labeled<T> {
-
-    /// Wrap `inner` with a `Watch` on dyanmically updated labels.
-    pub fn new(inner: T,
-               watch: futures_watch::Watch<Option<DstLabels>>)
-               -> Self
-    {
-        Self {
-            metric_labels: Some(watch),
-            inner,
-        }
-    }
-
-    /// Wrap `inner` with no `metric_labels`.
-    pub fn none(inner: T) -> Self {
-        Self { metric_labels: None, inner }
-    }
-}
-
-impl<T, A> Service for Labeled<T>
-where
-    T: Service<Request=http::Request<A>>,
-{
-    type Request = T::Request;
-    type Response= T::Response;
-    type Error = T::Error;
-    type Future = T::Future;
-
-    fn poll_ready(&mut self) -> Poll<(), Self::Error> {
-        self.inner.poll_ready()
-    }
-
-    fn call(&mut self, req: Self::Request) -> Self::Future {
-        let mut req = req;
-        if let Some(labels) = self.metric_labels.as_ref()
-            .and_then(|labels| (*labels.borrow()).as_ref().cloned())
-        {
-            req.extensions_mut().insert(labels);
-        }
-        self.inner.call(req)
-    }
-
 }
 
 /// Construct a new labeled `SocketAddr `from a protobuf `WeightedAddr`.
