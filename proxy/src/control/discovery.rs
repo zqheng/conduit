@@ -594,7 +594,7 @@ where T: HttpService<RequestBody = BoxBody, ResponseBody = RecvBody>,
 // ===== impl DstLabels ====
 
 impl DstLabels {
-    fn new<I, S>(labels: I) -> Option<Self>
+    pub fn new<I, S>(labels: I) -> Option<Self>
     where
         I: IntoIterator<Item=(S, S)>,
         S: fmt::Display,

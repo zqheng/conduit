@@ -312,4 +312,47 @@ mod test {
         labeled.call(http::Request::new(())).wait().unwrap();
     }
 
+    #[test]
+    fn one_label() {
+        let expected_labels = [Some("dst_foo=\"bar\"")];
+        let inner = MockInnerService::new(&expected_labels[..]);
+        let (watch, _) =
+            Watch::new(discovery::DstLabels::new(vec![("foo", "bar")]));
+        let mut labeled = Labeled {
+            metric_labels: Some(watch),
+            inner
+        };
+        // If the request has not been labeled with `dst_foo="bar"`,
+        // the assertion in `MockInnerService` will panic.
+        labeled.call(http::Request::new(())).wait().unwrap();
+    }
+
+    #[test]
+    fn label_updates() {
+        let expected_labels = [
+            Some("dst_foo=\"bar\""),
+            Some("dst_foo=\"baz\""),
+            Some("dst_foo=\"baz\",dst_quux=\"quuux\""),
+        ];
+        let inner = MockInnerService::new(&expected_labels[..]);
+        let (watch, mut store) =
+            Watch::new(discovery::DstLabels::new(vec![("foo", "bar")]));
+        let mut labeled = Labeled {
+            metric_labels: Some(watch),
+            inner
+        };
+        labeled.call(http::Request::new(())).wait().expect("first call");
+
+        store.store(discovery::DstLabels::new(vec![("foo", "baz")]))
+            .expect("store (\"foo\", \"baz\")");
+        labeled.call(http::Request::new(())).wait().expect("second call");
+
+        store.store(discovery::DstLabels::new(vec![
+            ("foo", "baz"),
+            ("quux", "quuux")
+        ]))
+            .expect("store (\"foo\", \"baz\"), (\"quux\", \"quuux\")");
+        labeled.call(http::Request::new(())).wait().expect("third call");
+    }
+
 }
