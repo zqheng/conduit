@@ -246,3 +246,70 @@ impl fmt::Display for Direction {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::{Async, Poll, Future};
+    use futures::future::{self, FutureResult};
+    // use futures_watch::{Store, Watch};
+    use http;
+    use tower::Service;
+
+
+    struct MockInnerService<'a> {
+        expected_labels: &'a [Option<&'a str>],
+        num_requests: AtomicUsize,
+    }
+
+    impl<'a> MockInnerService<'a> {
+        fn new(expected_labels: &'a [Option<&'a str>]) -> Self {
+            MockInnerService {
+                expected_labels,
+                num_requests: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl<'a> Service for MockInnerService<'a> {
+        type Request = http::Request<()>;
+        type Response = ();
+        type Error = ();
+        type Future = FutureResult<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self) -> Poll<(), Self::Error> {
+            Ok(Async::Ready(()))
+        }
+
+        fn call(&mut self, req: Self::Request) -> Self::Future {
+            let n = self.num_requests.fetch_add(1, Ordering::SeqCst);
+            let n = if n > self.expected_labels.len() {
+                self.expected_labels.len()
+            } else {
+                n
+            };
+            let req_labels = req.extensions()
+                .get::<discovery::DstLabels>()
+                .map(discovery::DstLabels::as_str);
+            assert_eq!(req_labels, self.expected_labels[n]);
+            future::ok(())
+        }
+    }
+
+    #[test]
+    fn no_labels() {
+        let expected_labels = [None];
+        let inner = MockInnerService::new(&expected_labels[..]);
+        let mut labeled = Labeled {
+            metric_labels: None,
+            inner
+        };
+        // If the request has been labeled, the assertion in
+        // `MockInnerService` will panic.
+        labeled.call(http::Request::new(())).wait().unwrap();
+    }
+
+}

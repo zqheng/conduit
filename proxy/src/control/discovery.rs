@@ -619,6 +619,10 @@ impl DstLabels {
             None
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
 }
 
 impl fmt::Display for DstLabels {
