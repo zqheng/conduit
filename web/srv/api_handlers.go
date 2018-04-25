@@ -9,6 +9,7 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/runconduit/conduit/controller/api/util"
 	pb "github.com/runconduit/conduit/controller/gen/public"
+	"github.com/runconduit/conduit/pkg/k8s"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -67,6 +68,35 @@ func (h *handler) handleApiPods(w http.ResponseWriter, req *http.Request, p http
 	}
 
 	renderJsonPb(w, pods)
+}
+
+func (h *handler) handleApiPods1(w http.ResponseWriter, req *http.Request, p httprouter.Params) {
+	resourceName := req.FormValue("resource_name")
+	resourceType := req.FormValue("resource_type")
+	namespace := req.FormValue("namespace")
+
+	resourceType, err := k8s.CanonicalKubernetesNameFromFriendlyName(resourceType)
+	if err != nil {
+		renderJsonError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	podReq := &pb.PodSummaryRequest{
+		Selector: &pb.ResourceSelection{
+			Resource: &pb.Resource{
+				Namespace: namespace,
+				Name:      resourceName,
+				Type:      resourceType,
+			},
+		},
+	}
+
+	result, err := h.apiClient.PodSummary(req.Context(), podReq)
+	if err != nil {
+		renderJsonError(w, err, http.StatusInternalServerError)
+		return
+	}
+	renderJsonPb(w, result)
 }
 
 func (h *handler) handleApiStat(w http.ResponseWriter, req *http.Request, p httprouter.Params) {

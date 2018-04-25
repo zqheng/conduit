@@ -48,6 +48,46 @@ type meshedCount struct {
 	total  uint64
 }
 
+func (s *grpcServer) PodSummary(ctx context.Context, req *pb.PodSummaryRequest) (*pb.PodSummaryResponse, error) {
+	objects, err := s.lister.GetObjects(req.Selector.Resource.Namespace, req.Selector.Resource.Type, req.Selector.Resource.Name)
+	if err != nil {
+		return nil, util.GRPCError(err)
+	}
+
+	var rows []*pb.PodList_Row
+
+	for _, object := range objects {
+		ns, name, kind, _, err := s.lister.GetSelectorFor(object)
+		resource := &pb.Resource{
+			Namespace: ns,
+			Type:      kind,
+			Name:      name,
+		}
+
+		statuses, err := s.getPodStatuses(object)
+		if err != nil {
+			return nil, util.GRPCError(err)
+		}
+
+		rows = append(rows, &pb.PodList_Row{
+			Resource:    resource,
+			PodStatuses: statuses,
+		})
+	}
+
+	rsp := &pb.PodSummaryResponse{
+		Response: &pb.PodSummaryResponse_Ok_{ // https://github.com/golang/protobuf/issues/205
+			Ok: &pb.PodSummaryResponse_Ok{
+				PodList: &pb.PodList{
+					Rows: rows,
+				},
+			},
+		},
+	}
+
+	return rsp, nil
+}
+
 func (s *grpcServer) StatSummary(ctx context.Context, req *pb.StatSummaryRequest) (*pb.StatSummaryResponse, error) {
 	// special case to check for services as outbound only
 	if req.Selector.Resource.Type == k8s.Services &&
@@ -326,6 +366,32 @@ func metricToKey(metric model.Metric, groupBy model.LabelNames) string {
 		values = append(values, string(metric[k]))
 	}
 	return strings.Join(values, "/")
+}
+
+func (s *grpcServer) getPodStatuses(obj runtime.Object) ([]*pb.PodList_Row_PodStatus, error) {
+	pods, err := s.lister.GetPodsFor(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	podStatuses := make([]*pb.PodList_Row_PodStatus, 0)
+	for _, pod := range pods {
+		controllerComponent := pod.Labels[k8s.ControllerComponentLabel]
+
+		status := string(pod.Status.Phase)
+		if pod.DeletionTimestamp != nil {
+			status = "Terminating"
+		}
+
+		podStatuses = append(podStatuses, &pb.PodList_Row_PodStatus{
+			Name:         pod.Name,
+			Added:        isInMesh(pod),
+			ControlPlane: controllerComponent != "",
+			Status:       status,
+		})
+	}
+
+	return podStatuses, nil
 }
 
 func (s *grpcServer) getMeshedPodCount(obj runtime.Object) (*meshedCount, error) {

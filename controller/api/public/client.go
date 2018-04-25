@@ -32,10 +32,15 @@ type grpcOverHttpClient struct {
 	httpClient *http.Client
 }
 
-// TODO: This will replace Stat, once implemented
 func (c *grpcOverHttpClient) StatSummary(ctx context.Context, req *pb.StatSummaryRequest, _ ...grpc.CallOption) (*pb.StatSummaryResponse, error) {
 	var msg pb.StatSummaryResponse
 	err := c.apiRequest(ctx, "StatSummary", req, &msg)
+	return &msg, err
+}
+
+func (c *grpcOverHttpClient) PodSummary(ctx context.Context, req *pb.PodSummaryRequest, _ ...grpc.CallOption) (*pb.PodSummaryResponse, error) {
+	var msg pb.PodSummaryResponse
+	err := c.apiRequest(ctx, "PodSummary", req, &msg)
 	return &msg, err
 }
 

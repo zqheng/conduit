@@ -2,16 +2,13 @@ import _ from 'lodash';
 import CallToAction from './CallToAction.jsx';
 import ConduitSpinner from "./ConduitSpinner.jsx";
 import ErrorBanner from './ErrorBanner.jsx';
+import { getPodCategorization } from './util/MetricUtils.js';
 import { incompleteMeshMessage } from './util/CopyUtils.jsx';
 import Metric from './Metric.jsx';
 import PageHeader from './PageHeader.jsx';
 import React from 'react';
 import StatusTable from './StatusTable.jsx';
 import { Col, Row, Table } from 'antd';
-import {
-  getComponentPods,
-  getPodsByDeployment,
-} from './util/MetricUtils.js';
 import './../../css/service-mesh.css';
 
 const serviceMeshDetailsColumns = [
@@ -27,23 +24,6 @@ const serviceMeshDetailsColumns = [
     className: "numeric"
   }
 ];
-const componentNames = {
-  "prometheus":   "Prometheus",
-  "destination":  "Destination",
-  "proxy-api":    "Proxy API",
-  "public-api":   "Public API",
-  "tap":          "Tap",
-  "web":          "Web UI"
-};
-
-const componentDeploys = {
-  "prometheus":   "prometheus",
-  "destination":  "controller",
-  "proxy-api":    "controller",
-  "public-api":   "controller",
-  "tap":          "controller",
-  "web":          "web"
-};
 
 export default class ServiceMesh extends React.Component {
   constructor(props) {
@@ -55,7 +35,7 @@ export default class ServiceMesh extends React.Component {
     this.state = {
       pollingInterval: 2000,
       metrics: [],
-      deploys: [],
+      deployments: [],
       components: [],
       lastUpdated: 0,
       pendingRequests: false,
@@ -81,16 +61,21 @@ export default class ServiceMesh extends React.Component {
     this.setState({ pendingRequests: true });
 
     this.api.setCurrentRequests([
-      this.api.fetchPods()
+      this.api.fetchPods1("deploy"),
+      this.api.fetchPods1("rc"),
     ]);
 
     this.serverPromise = Promise.all(this.api.getCurrentPromises())
-      .then(([pods]) => {
-        let podsByDeploy = getPodsByDeployment(pods.pods);
-        let controlPlanePods = this.processComponents(pods.pods);
+      .then(([deploys, rcs]) => {
+        let deployStatuses = _.get(deploys, ["ok", "podList", "rows"], []);
+        let rcStatuses = _.get(rcs, ["ok", "podList", "rows"], []);
+        let controlPlanePods = _.filter(deployStatuses, s => {
+          return _.every(s.podStatuses, ps => ps.controlPlane);
+        });
 
         this.setState({
-          deploys: podsByDeploy,
+          deployments: this.categorizePods(deployStatuses),
+          replicationcontrollers: this.categorizePods(rcStatuses),
           components: controlPlanePods,
           lastUpdated: Date.now(),
           pendingRequests: false,
@@ -99,6 +84,14 @@ export default class ServiceMesh extends React.Component {
         });
       })
       .catch(this.handleApiError);
+  }
+
+  categorizePods(statuses) {
+    return _.map(statuses, d => {
+      _.each(d.podStatuses, pod => pod.value = getPodCategorization(pod));
+      d.added = _.every(d.podStatuses, 'added');
+      return d;
+    });
   }
 
   handleApiError(e) {
@@ -112,17 +105,21 @@ export default class ServiceMesh extends React.Component {
     });
   }
 
-  addedDeploymentCount() {
-    return _.size(_.filter(this.state.deploys, ["added", true]));
+  addedResourceCount(resource) {
+    return _.size(_.filter(this.state[resource], ["added", true]));
   }
 
-  unaddedDeploymentCount() {
-    return this.deployCount() - this.addedDeploymentCount();
+  unaddedResourceCount(resource) {
+    return this.resourceCount(resource) - this.addedResourceCount(resource);
   }
 
-  proxyCount() {
-    return _.sum(_.map(this.state.deploys, d => {
-      return _.size(_.filter(d.pods, ["value", "good"]));
+  totalProxyCount() {
+    return this.proxyCount("deployments") + this.proxyCount("replicationcontrollers");
+  }
+
+  proxyCount(resource) {
+    return _.sum(_.map(_.concat(this.state[resource]), d => {
+      return _.size(_.filter(d.podStatuses, ["value", "good"]));
     }));
   }
 
@@ -130,8 +127,8 @@ export default class ServiceMesh extends React.Component {
     return _.size(this.state.components);
   }
 
-  deployCount() {
-    return _.size(this.state.deploys);
+  resourceCount(resource) {
+    return _.size(this.state[resource]);
   }
 
   getServiceMeshDetails() {
@@ -139,26 +136,15 @@ export default class ServiceMesh extends React.Component {
       { key: 1, name: "Conduit version", value: this.props.releaseVersion },
       { key: 2, name: "Conduit namespace", value: this.props.controllerNamespace },
       { key: 3, name: "Control plane components", value: this.componentCount() },
-      { key: 4, name: "Added deployments", value: this.addedDeploymentCount() },
-      { key: 5, name: "Unadded deployments", value: this.unaddedDeploymentCount() },
-      { key: 6, name: "Data plane proxies", value: this.proxyCount() }
+      { key: 4, name: "Added deployments", value: this.addedResourceCount("deployments") },
+      { key: 5, name: "Unadded deployments", value: this.unaddedResourceCount("deployments") },
+      { key: 6, name: "Added RCs", value: this.addedResourceCount("replicationcontrollers") },
+      { key: 7, name: "Unadded RCs", value: this.unaddedResourceCount("replicationcontrollers") },
+      { key: 8, name: "Data plane proxies", value: this.totalProxyCount() }
     ];
   }
 
-  processComponents(pods) {
-    let podIndex = _(pods)
-      .filter(p => p.controlPlane)
-      .groupBy(p => _.last(_.split(p.deployment, "/")))
-      .value();
 
-    return _(componentNames)
-      .map((name, id) => {
-        let componentPods = _.get(podIndex, _.get(componentDeploys, id), []);
-        return { name: name, pods: getComponentPods(componentPods) };
-      })
-      .sortBy("name")
-      .value();
-  }
 
   renderControlPlaneDetails() {
     return (
@@ -169,6 +155,7 @@ export default class ServiceMesh extends React.Component {
         </div>
 
         <StatusTable
+          componentColumnTitle="Component"
           data={this.state.components}
           statusColumnTitle="Pod Status"
           shouldLink={false}
@@ -177,17 +164,18 @@ export default class ServiceMesh extends React.Component {
     );
   }
 
-  renderDataPlaneDetails() {
+  renderDataPlaneTable(resource, friendlyName, shortName) {
     return (
       <div className="mesh-section">
         <div className="clearfix header-with-metric">
-          <div className="subsection-header">Data plane</div>
-          <Metric title="Proxies" value={this.proxyCount()} className="metric-large" />
-          <Metric title="Deployments" value={this.deployCount()} className="metric-large" />
+          <div className="subsection-header">Data plane: {friendlyName}</div>
+          <Metric title="Proxies" value={this.proxyCount(resource)} className="metric-large" />
+          <Metric title={shortName || friendlyName} value={this.resourceCount(resource)} className="metric-large" />
         </div>
 
         <StatusTable
-          data={this.state.deploys}
+          data={this.state[resource]}
+          componentColumnTitle={_.slice(friendlyName, 0, -1).join("")}
           statusColumnTitle="Proxy Status"
           shouldLink={true}
           api={this.api}  />
@@ -214,33 +202,21 @@ export default class ServiceMesh extends React.Component {
     );
   }
 
-  renderAddDeploymentsMessage() {
-    if (this.deployCount() === 0) {
-      return (
-        <div className="mesh-completion-message">
-          No deployments detected. {incompleteMeshMessage()}
-        </div>
-      );
+  renderAddResourceMessage(resource, friendlyName) {
+    if (this.resourceCount(resource) === 0) {
+      return (<div className="mesh-completion-message">
+        No {friendlyName}s detected. {incompleteMeshMessage()}
+      </div>);
     } else {
-      switch (this.unaddedDeploymentCount()) {
-      case 0:
-        return (
-          <div className="mesh-completion-message">
-            All deployments have been added to the service mesh.
-          </div>
-        );
-      case 1:
-        return (
-          <div className="mesh-completion-message">
-            1 deployment has not been added to the service mesh. {incompleteMeshMessage()}
-          </div>
-        );
-      default:
-        return (
-          <div className="mesh-completion-message">
-            {this.unaddedDeploymentCount()} deployments have not been added to the service mesh. {incompleteMeshMessage()}
-          </div>
-        );
+      let unaddedResources = this.unaddedResourceCount(resource);
+      if (unaddedResources === 0) {
+        return (<div className="mesh-completion-message">
+        All {friendlyName}s have been added to the service mesh.</div>);
+      } else {
+        return (<div className="mesh-completion-message">
+          {unaddedResources} {friendlyName}{unaddedResources === 1 ? "has" : "s have"} not been added to the mesh.
+          {incompleteMeshMessage()}
+        </div>);
       }
     }
   }
@@ -256,16 +232,22 @@ export default class ServiceMesh extends React.Component {
 
   renderDataPlane() {
     return (
-      <Row gutter={16}>
-        <Col span={16}>{this.renderDataPlaneDetails()}</Col>
-        <Col span={8}>{this.renderAddDeploymentsMessage()}</Col>
-      </Row>
+      <div>
+        <Row gutter={16}>
+          <Col span={16}>{this.renderDataPlaneTable("deployments", "Deployments")}</Col>
+          <Col span={8}>{this.renderAddResourceMessage("deployments", "deployment")}</Col>
+        </Row>
+        <Row gutter={16}>
+          <Col span={16}>{this.renderDataPlaneTable("replicationcontrollers", "Replication Controllers", "RCs")}</Col>
+          <Col span={8}>{this.renderAddResourceMessage("replicationcontrollers", "replication controller")}</Col>
+        </Row>
+      </div>
     );
   }
 
   renderOverview() {
-    if (this.proxyCount() === 0) {
-      return <CallToAction numDeployments={this.deployCount()} />;
+    if (this.proxyCount("deployments") === 0) {
+      return <CallToAction numDeployments={this.resourceCount("deployments")} />;
     }
   }
 
@@ -277,7 +259,7 @@ export default class ServiceMesh extends React.Component {
           <div>
             <PageHeader
               header="Service mesh overview"
-              hideButtons={this.proxyCount() === 0}
+              hideButtons={this.proxyCount("deployments") === 0}
               api={this.api} />
             {this.renderOverview()}
             {this.renderControlPlane()}

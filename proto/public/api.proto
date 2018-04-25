@@ -131,6 +131,37 @@ message ResourceError {
   string error = 2;
 }
 
+message PodSummaryRequest {
+  ResourceSelection selector = 1;
+}
+
+message PodSummaryResponse {
+  oneof response {
+    Ok ok = 1;
+    ResourceError error = 2;
+  }
+
+  message Ok {
+    PodList pod_list = 1;
+  }
+}
+
+message PodList {
+  repeated Row rows = 1;
+
+  message Row {
+    Resource resource = 1;
+
+    repeated PodStatus pod_statuses = 2;
+    message PodStatus {
+      string name = 1;
+      string status = 2;
+      bool added = 3;
+      bool control_plane = 4;
+    }
+  }
+}
+
 message StatSummaryRequest {
   ResourceSelection selector = 1;
   string time_window = 2;
@@ -182,6 +213,8 @@ message StatTable {
 
 service Api {
   rpc StatSummary(StatSummaryRequest) returns (StatSummaryResponse) {}
+
+  rpc PodSummary(PodSummaryRequest) returns (PodSummaryResponse) {}
 
   rpc ListPods(Empty) returns (ListPodsResponse) {}
 

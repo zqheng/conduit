@@ -14,6 +14,7 @@ const (
 	Pods                   = "pods"
 	ReplicationControllers = "replicationcontrollers"
 	Services               = "services"
+	ReplicaSets            = "replicasets"
 )
 
 // ResourceTypesToProxyLabels maps Kubernetes resource type names to keys
@@ -79,6 +80,8 @@ func CanonicalKubernetesNameFromFriendlyName(friendlyName string) (string, error
 		return ReplicationControllers, nil
 	case "svc", "service", "services":
 		return Services, nil
+	case "rs", "replicaset":
+		return ReplicaSets, nil
 	}
 
 	return "", fmt.Errorf("cannot find Kubernetes canonical name from friendly name [%s]", friendlyName)

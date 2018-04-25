@@ -116,39 +116,63 @@ func (l *Lister) GetObjects(namespace, restype, name string) ([]runtime.Object, 
 	}
 }
 
-// GetPodsFor returns all running and pending Pods associated with a given
-// Kubernetes object.
-func (l *Lister) GetPodsFor(obj runtime.Object) ([]*apiv1.Pod, error) {
+func (l *Lister) GetSelectorFor(obj runtime.Object) (string, string, string, labels.Selector, error) {
 	var namespace string
+	var name string
+	var kind string
 	var selector labels.Selector
 
 	switch typed := obj.(type) {
 	case *apiv1.Namespace:
 		namespace = typed.Name
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("namespace")
+
 		selector = labels.Everything()
 
 	case *appsv1beta2.Deployment:
 		namespace = typed.Namespace
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("deployment")
 		selector = labels.Set(typed.Spec.Selector.MatchLabels).AsSelector()
 
 	case *appsv1beta2.ReplicaSet:
 		namespace = typed.Namespace
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("replicaset")
 		selector = labels.Set(typed.Spec.Selector.MatchLabels).AsSelector()
 
 	case *apiv1.ReplicationController:
 		namespace = typed.Namespace
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("replicationcontroller")
 		selector = labels.Set(typed.Spec.Selector).AsSelector()
 
 	case *apiv1.Service:
 		namespace = typed.Namespace
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("service")
 		selector = labels.Set(typed.Spec.Selector).AsSelector()
 
 	case *apiv1.Pod:
 		namespace = typed.Namespace
+		name = typed.Name
+		kind, _ = k8s.CanonicalKubernetesNameFromFriendlyName("pod")
 		selector = labels.Everything()
 
 	default:
-		return nil, fmt.Errorf("Cannot get object selector: %v", obj)
+		return "", "", "", nil, fmt.Errorf("Cannot get object selector: %v", obj)
+	}
+
+	return namespace, name, kind, selector, nil
+}
+
+// GetPodsFor returns all running and pending Pods associated with a given
+// Kubernetes object.
+func (l *Lister) GetPodsFor(obj runtime.Object) ([]*apiv1.Pod, error) {
+	namespace, _, _, selector, err := l.GetSelectorFor(obj)
+	if err != nil {
+		return nil, err
 	}
 
 	pods, err := l.Pod.Pods(namespace).List(selector)

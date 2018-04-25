@@ -40,9 +40,9 @@ const StatusDot = ({status, multilineDots, columnName}) => (
 );
 
 const columns = {
-  resourceName: (shouldLink, ConduitLink) => {
+  resourceName: (resource, shouldLink, ConduitLink) => {
     return {
-      title: "Deployment",
+      title: resource,
       key: "name",
       render: row => {
         let ownerInfo = row.name.split("/");
@@ -84,9 +84,9 @@ export default class StatusTable extends React.Component {
   getTableData() {
     let tableData = _.map(this.props.data, datum => {
       return {
-        name: datum.name,
-        statuses: datum.pods,
-        numEntities: _.size(datum.pods),
+        name: datum.resource.namespace + "/" + datum.resource.name,
+        statuses: datum.podStatuses,
+        numEntities: _.size(datum.podStatuses),
         added: datum.added
       };
     });
@@ -95,7 +95,7 @@ export default class StatusTable extends React.Component {
 
   render() {
     let tableCols = [
-      columns.resourceName(this.props.shouldLink, this.props.api.ConduitLink),
+      columns.resourceName(this.props.componentColumnTitle, this.props.shouldLink, this.props.api.ConduitLink),
       columns.pods,
       columns.status(this.props.statusColumnTitle)
     ];

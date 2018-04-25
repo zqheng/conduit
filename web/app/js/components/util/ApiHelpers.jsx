@@ -71,6 +71,10 @@ export const ApiHelpers = (pathPrefix, defaultMetricsWindow = '1m') => {
     return apiFetch(podsPath);
   };
 
+  const fetchPods1 = resource => {
+    return apiFetch('/api/pods1?resource_type=' + resource);
+  };
+
   const getMetricsWindow = () => metricsWindow;
   const getMetricsWindowDisplayText = () => validMetricsWindows[metricsWindow];
 
@@ -149,6 +153,7 @@ export const ApiHelpers = (pathPrefix, defaultMetricsWindow = '1m') => {
     fetch: apiFetch,
     fetchMetrics,
     fetchPods,
+    fetchPods1,
     getMetricsWindow,
     setMetricsWindow,
     getValidMetricsWindows: () => _.keys(validMetricsWindows),

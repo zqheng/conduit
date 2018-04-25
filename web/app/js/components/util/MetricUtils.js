@@ -1,6 +1,6 @@
 import _ from 'lodash';
 
-const getPodCategorization = pod => {
+export const getPodCategorization = pod => {
   if (pod.added && pod.status === "Running") {
     return "good";
   } else if (pod.status === "Pending" || pod.status === "Running") {
