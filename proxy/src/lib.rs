@@ -57,9 +57,10 @@ use indexmap::IndexSet;
 use tokio_core::reactor::{Core, Handle};
 use tower_service::NewService;
 use tower_fn::*;
-use conduit_proxy_router::{Recognize, Router, Error as RouteError};
+use conduit_proxy_router::{HasActivity, Recognize, Router, Error as RouteError};
 
 pub mod app;
+mod http_activity;
 mod bind;
 pub mod config;
 mod connection;
@@ -349,6 +350,7 @@ where
         RouteError = F,
     >
         + 'static,
+    R::Service: HasActivity,
     G: GetOriginalDst + 'static,
 {
     let router = Router::new(recognize, router_capacity);

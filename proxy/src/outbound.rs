@@ -14,12 +14,14 @@ use tower_in_flight_limit::InFlightLimit;
 use tower_h2;
 use conduit_proxy_router::Recognize;
 
+use http_activity::HttpActivity;
 use bind::{self, Bind, Protocol};
 use control::{self, discovery};
 use control::discovery::Bind as BindTrait;
 use ctx;
 use timeout::Timeout;
-use transparency::h1;
+use telemetry::sensor;
+use transparency::{h1, HttpBody};
 use transport::{DnsNameAndPort, Host, HostAndPort};
 
 type BindProtocol<B> = bind::BindProtocol<Arc<ctx::Proxy>, B>;
@@ -53,19 +55,25 @@ pub enum Destination {
     ImplicitOriginalDst(SocketAddr),
 }
 
+type ResponseBody = sensor::http::ResponseBody<HttpBody>;
+
 impl<B> Recognize for Outbound<B>
 where
     B: tower_h2::Body + 'static,
 {
     type Request = http::Request<B>;
-    type Response = bind::HttpResponse;
+    type Response = http::Response<ResponseBody>;
     type Error = <Self::Service as tower::Service>::Error;
     type Key = (Destination, Protocol);
     type RouteError = bind::BufferSpawnError;
-    type Service = InFlightLimit<Timeout<Buffer<Balance<
-        load::WithPendingRequests<Discovery<B>>,
-        choose::PowerOfTwoChoices<rand::ThreadRng>
-    >>>>;
+    type Service = HttpActivity<
+        InFlightLimit<Timeout<Buffer<Balance<
+            load::WithPendingRequests<Discovery<B>>,
+            choose::PowerOfTwoChoices<rand::ThreadRng>
+        >>>>,
+        B,
+        ResponseBody,
+    >;
 
     fn recognize(&self, req: &Self::Request) -> Option<Self::Key> {
         let proto = bind::Protocol::detect(req);
@@ -151,8 +159,7 @@ where
 
         let timeout = Timeout::new(buffer, self.bind_timeout, handle);
 
-        Ok(InFlightLimit::new(timeout, MAX_IN_FLIGHT))
-
+        Ok(HttpActivity::from(InFlightLimit::new(timeout, MAX_IN_FLIGHT)))
     }
 }
 

@@ -8,8 +8,11 @@ use tower_in_flight_limit::{self, InFlightLimit};
 use tower_h2;
 use conduit_proxy_router::Recognize;
 
+use http_activity::HttpActivity;
 use bind;
 use ctx;
+use telemetry::sensor;
+use transparency::HttpBody;
 
 type Bind<B> = bind::Bind<Arc<ctx::Proxy>, B>;
 
@@ -31,12 +34,14 @@ impl<B> Inbound<B> {
     }
 }
 
+type ResponseBody = sensor::http::ResponseBody<HttpBody>;
+
 impl<B> Recognize for Inbound<B>
 where
     B: tower_h2::Body + 'static,
 {
     type Request = http::Request<B>;
-    type Response = bind::HttpResponse;
+    type Response = http::Response<ResponseBody>;
     type Error = tower_in_flight_limit::Error<
         tower_buffer::Error<
             <bind::Service<B> as tower::Service>::Error
@@ -44,7 +49,11 @@ where
     >;
     type Key = (SocketAddr, bind::Protocol);
     type RouteError = bind::BufferSpawnError;
-    type Service = InFlightLimit<Buffer<bind::Service<B>>>;
+    type Service = HttpActivity<
+        InFlightLimit<Buffer<bind::Service<B>>>,
+        B,
+        ResponseBody,
+    >;
 
     fn recognize(&self, req: &Self::Request) -> Option<Self::Key> {
         let key = req.extensions()
@@ -78,7 +87,7 @@ where
         let binding = self.bind.new_binding(&endpoint, proto);
         Buffer::new(binding, self.bind.executor())
             .map(|buffer| {
-                InFlightLimit::new(buffer, MAX_IN_FLIGHT)
+                HttpActivity::from(InFlightLimit::new(buffer, MAX_IN_FLIGHT))
             })
             .map_err(|_| bind::BufferSpawnError::Inbound)
     }

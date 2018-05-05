@@ -4,15 +4,22 @@ extern crate tower_service;
 
 use futures::{Future, Poll};
 use indexmap::IndexMap;
+use std::{
+    error, fmt, mem,
+    hash::Hash,
+    sync::{Arc, Mutex}
+};
 use tower_service::Service;
 
-use std::{error, fmt, mem};
-use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+pub mod activity;
+
+pub use self::activity::{Activity, HasActivity, TrackActivity, PendingRequest, ActiveResponse};
 
 /// Routes requests based on a configurable `Key`.
 pub struct Router<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     inner: Arc<Mutex<Inner<T>>>,
 }
@@ -40,9 +47,11 @@ pub trait Recognize {
     type RouteError;
 
     /// A route.
-    type Service: Service<Request = Self::Request,
-                         Response = Self::Response,
-                            Error = Self::Error>;
+    type Service: Service<
+        Request = Self::Request,
+        Response = Self::Response,
+        Error = Self::Error
+    >;
 
     /// Determines the key for a route to handle the given request.
     fn recognize(&self, req: &Self::Request) -> Option<Self::Key>;
@@ -65,7 +74,9 @@ pub enum Error<T, U> {
 }
 
 pub struct ResponseFuture<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     state: State<T>,
 }
@@ -79,7 +90,9 @@ where T: Recognize,
 }
 
 enum State<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     Inner(<T::Service as Service>::Future),
     RouteError(T::RouteError),
@@ -91,7 +104,9 @@ where T: Recognize,
 // ===== impl Router =====
 
 impl<T> Router<T>
-where T: Recognize
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     pub fn new(recognize: T, capacity: usize) -> Self {
         Router {
@@ -104,17 +119,10 @@ where T: Recognize
     }
 }
 
-macro_rules! try_bind_route {
-    ( $bind:expr ) => {
-        match $bind {
-            Ok(svc) => svc,
-            Err(e) => return ResponseFuture { state: State::RouteError(e) },
-        }
-    }
-}
-
 impl<T> Service for Router<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     type Request = T::Request;
     type Response = T::Response;
@@ -157,7 +165,11 @@ where T: Recognize,
         }
 
         // Bind a new route, send the request on the route, and cache the route.
-        let mut service = try_bind_route!(inner.recognize.bind_service(&key));
+        let mut service = match inner.recognize.bind_service(&key) {
+            Ok(service) => service,
+            Err(e) => return ResponseFuture::route_err(e),
+        };
+
         let response = service.call(request);
         inner.routes.insert(key, service);
         ResponseFuture::new(response)
@@ -165,10 +177,12 @@ where T: Recognize,
 }
 
 impl<T> Clone for Router<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     fn clone(&self) -> Self {
-        Router { inner: self.inner.clone() }
+        Self { inner: self.inner.clone() }
     }
 }
 
@@ -200,7 +214,9 @@ impl<S: Service> Recognize for Single<S> {
 // ===== impl ResponseFuture =====
 
 impl<T> ResponseFuture<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     fn new(inner: <T::Service as Service>::Future) -> Self {
         ResponseFuture { state: State::Inner(inner) }
@@ -213,10 +229,16 @@ where T: Recognize,
     fn no_capacity(capacity: usize) -> Self {
         ResponseFuture { state: State::NoCapacity(capacity) }
     }
+
+    fn route_err(e: T::RouteError) -> Self {
+        ResponseFuture { state: State::RouteError(e) }
+    }
 }
 
 impl<T> Future for ResponseFuture<T>
-where T: Recognize,
+where
+    T: Recognize,
+    T::Service: HasActivity,
 {
     type Item = T::Response;
     type Error = Error<T::Error, T::RouteError>;
@@ -248,11 +270,10 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Error::Inner(ref why) => fmt::Display::fmt(why, f),
-            Error::Route(ref why) =>
-                write!(f, "route recognition failed: {}", why),
-            Error::NotRecognized => f.pad("route not recognized"),
+            Error::Inner(ref why) => why.fmt(f),
+            Error::Route(ref why) => write!(f, "route recognition failed: {}", why),
             Error::NoCapacity(capacity) => write!(f, "router capacity reached ({})", capacity),
+            Error::NotRecognized => f.pad("route not recognized"),
         }
     }
 }
@@ -288,7 +309,7 @@ mod tests {
 
     struct Recognize;
 
-    struct MultiplyAndAssign(usize);
+    struct MultiplyAndAssign(usize, super::TrackActivity);
 
     enum Request {
         NotRecognized,
@@ -311,7 +332,7 @@ mod tests {
         }
 
         fn bind_service(&mut self, _: &Self::Key) -> Result<Self::Service, Self::RouteError> {
-            Ok(MultiplyAndAssign(1))
+            Ok(MultiplyAndAssign(1, super::TrackActivity::default()))
         }
     }
 
@@ -326,12 +347,20 @@ mod tests {
         }
 
         fn call(&mut self, req: Self::Request) -> Self::Future {
+            let _req = self.1.pending_request();
+            let _rsp = self.1.active_response();
             let n = match req {
                 Request::NotRecognized => unreachable!(),
                 Request::Recgonized(n) => n,
             };
             self.0 *= n;
             future::ok(self.0)
+        }
+    }
+
+    impl super::HasActivity for MultiplyAndAssign {
+        fn activity(&self) -> &super::Activity {
+            self.1.activity()
         }
     }
 
