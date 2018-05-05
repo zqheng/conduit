@@ -6,8 +6,10 @@ use futures::{Future, Poll};
 use indexmap::IndexMap;
 use std::{
     error, fmt, mem,
+    collections::VecDeque,
     hash::Hash,
-    sync::{Arc, Mutex}
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 use tower_service::Service;
 
@@ -81,12 +83,20 @@ where
     state: State<T>,
 }
 
+type LastUsed<K> = VecDeque<Used<K>>;
+
 struct Inner<T>
 where T: Recognize,
 {
     routes: IndexMap<T::Key, T::Service>,
+    last_used: LastUsed<T::Key>,
     recognize: T,
     capacity: usize,
+}
+
+struct Used<K> {
+    key: K,
+    time: Instant,
 }
 
 enum State<T>
@@ -101,6 +111,92 @@ where
     Invalid,
 }
 
+impl<K> From<K> for Used<K> {
+    fn from(key: K) -> Self {
+        Self {
+            key,
+            time: Instant::now(),
+        }
+    }
+}
+
+// ===== impl Inner =====
+
+impl<T> Inner<T>
+where
+    T: Recognize,
+    T::Service: HasActivity,
+{
+    fn new(recognize: T, capacity: usize) -> Self {
+        Self {
+            routes: IndexMap::default(),
+            last_used: LastUsed::new(),
+            recognize,
+            capacity,
+        }
+    }
+
+    fn current_capacity(&self) -> usize {
+        self.capacity - self.routes.len()
+    }
+
+    fn create_capacity(&mut self) {
+        for idx in 0..self.last_used.len() {
+            let idle = self.routes
+                .get(&self.last_used[idx].key)
+                .map(|r| {
+                    let a = r.activity();
+                    a.pending_requests() + a.active_responses() > 0
+                })
+                .unwrap_or(false);
+
+            if idle {
+                Self::move_to_end(&mut self.last_used, idx);
+                if let Some(Used{key, ..}) = self.last_used.pop_back() {
+                    self.routes.remove(&key);
+                }
+                return;
+            }
+        }
+    }
+
+    fn move_to_end(last_used: &mut LastUsed<T::Key>, idx: usize) {
+        for i in idx..last_used.len()-1 {
+            last_used.swap(i, i + 1);
+        }
+    }
+
+    fn mark_route(&mut self, key: &T::Key) -> Option<&mut T::Service> {
+        match self.routes.get_mut(key) {
+            None => None,
+            Some(svc) => {
+                Self::mark_used(&mut self.last_used, key);
+                Some(svc)
+            }
+        }
+    }
+
+    fn add_route(&mut self, key: T::Key, service: T::Service) {
+        Self::mark_used(&mut self.last_used, &key);
+        self.routes.insert(key, service);
+    }
+
+    fn mark_used(last_used: &mut LastUsed<T::Key>, key: &T::Key) {
+        match last_used.iter().rposition(|&Used{key: ref k, ..}| k == key) {
+            Some(idx) => {
+                last_used[idx].time = Instant::now();
+                for i in idx..last_used.len()-1 {
+                    last_used.swap(i, i + 1);
+                }
+            }
+
+            None => {
+                last_used.push_back(key.clone().into());
+            }
+        }
+    }
+}
+
 // ===== impl Router =====
 
 impl<T> Router<T>
@@ -109,12 +205,8 @@ where
     T::Service: HasActivity,
 {
     pub fn new(recognize: T, capacity: usize) -> Self {
-        Router {
-            inner: Arc::new(Mutex::new(Inner {
-                routes: IndexMap::default(),
-                recognize,
-                capacity,
-            })),
+        Self {
+            inner: Arc::new(Mutex::new(Inner::new(recognize, capacity))),
         }
     }
 }
@@ -144,7 +236,7 @@ where
     ///
     /// The response fails when the request cannot be routed.
     fn call(&mut self, request: Self::Request) -> Self::Future {
-        let inner = &mut *self.inner.lock().expect("lock router cache");
+        let inner = &mut *self.inner.lock().expect("router lock");
 
         let key = match inner.recognize.recognize(&request) {
             Some(key) => key,
@@ -152,15 +244,18 @@ where
         };
 
         // First, try to load a cached route for `key`.
-        if let Some(service) = inner.routes.get_mut(&key) {
-            return ResponseFuture::new(service.call(request));
+        if let Some(svc) = inner.mark_route(&key) {
+            return ResponseFuture::new(svc.call(request));
         }
 
         // Since there wasn't a cached route, ensure that there is capacity for a
         // new one.
-        if inner.routes.len() == inner.capacity {
-            // TODO If the cache is full, evict the oldest inactive route. If all
-            // routes are active, fail the request.
+        if inner.current_capacity() == 0 {
+            // If the cache is full, evict the oldest inactive route.
+            inner.create_capacity();
+        }
+        // If all routes are active, fail the request.
+        if inner.current_capacity() == 0 {
             return ResponseFuture::no_capacity(inner.capacity);
         }
 
@@ -171,7 +266,7 @@ where
         };
 
         let response = service.call(request);
-        inner.routes.insert(key, service);
+        inner.add_route(key, service);
         ResponseFuture::new(response)
     }
 }
