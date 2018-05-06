@@ -145,20 +145,14 @@ where
         let cache = &mut *self.cache.lock().expect("router lock");
 
         // First, try to load a cached route for `key`.
-        if let Some(svc) = cache.get_route(&key) {
+        if let Some(mut svc) = cache.access(&key) {
             return ResponseFuture::new(svc.call(request));
         }
 
         // Since there wasn't a cached route, ensure that there is capacity for a
         // new one.
-        if cache.available_capacity() == 0 {
-            // If the cache is full, evict the oldest idle route.
-            cache.evict_idle_routes();
-
-            // If all routes are active, fail the request.
-            if cache.available_capacity() == 0 {
-                return ResponseFuture::no_capacity(cache.capacity());
-            }
+        if let Err(cache::Exhausted { capacity }) = cache.ensure_can_store() {
+            return ResponseFuture::no_capacity(capacity);
         }
 
         // Bind a new route, send the request on the route, and cache the route.
@@ -168,7 +162,7 @@ where
         };
 
         let response = service.call(request);
-        cache.add_route(key, service).expect("cache capacity");
+        cache.store(key, service).expect("cache capacity");
         ResponseFuture::new(response)
     }
 }
