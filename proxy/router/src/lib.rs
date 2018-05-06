@@ -153,7 +153,8 @@ where
         // new one.
         if cache.available_capacity() == 0 {
             // If the cache is full, evict the oldest idle route.
-            cache.evict_oldest_idle_route();
+            cache.evict_idle_routes();
+
             // If all routes are active, fail the request.
             if cache.available_capacity() == 0 {
                 return ResponseFuture::no_capacity(cache.capacity());
@@ -162,12 +163,12 @@ where
 
         // Bind a new route, send the request on the route, and cache the route.
         let mut service = match self.recognize.bind_service(&key) {
-            Ok(service) => service,
+            Ok(s) => s,
             Err(e) => return ResponseFuture::route_err(e),
         };
 
         let response = service.call(request);
-        cache.add_route(key, service);
+        cache.add_route(key, service).expect("cache capacity");
         ResponseFuture::new(response)
     }
 }
