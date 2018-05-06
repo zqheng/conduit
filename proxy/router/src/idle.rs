@@ -9,7 +9,7 @@ pub trait IsIdle {
 #[derive(Debug, Default, Clone)]
 pub struct Idle(Arc<AtomicUsize>);
 
-/// A handle that decrements the number of active messages on drop..
+/// A handle that decrements the number of active messages on drop.
 #[derive(Debug)]
 pub struct Active(Option<Arc<AtomicUsize>>);
 
