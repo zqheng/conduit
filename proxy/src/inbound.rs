@@ -8,9 +8,9 @@ use tower_in_flight_limit::{self, InFlightLimit};
 use tower_h2;
 use conduit_proxy_router::Recognize;
 
-use http_activity::HttpActivity;
 use bind;
 use ctx;
+use http_idle::HttpIdle;
 use telemetry::sensor;
 use transparency::HttpBody;
 
@@ -58,7 +58,7 @@ where
     >;
     type Key = (SocketAddr, bind::Protocol);
     type RouteError = bind::BufferSpawnError;
-    type Service = HttpActivity<
+    type Service = HttpIdle<
         InFlightLimit<Buffer<bind::Service<B>>>,
         B,
         ResponseBody,
@@ -96,7 +96,7 @@ where
         let binding = self.bind.new_binding(&endpoint, proto);
         Buffer::new(binding, self.bind.executor())
             .map(|buffer| {
-                HttpActivity::from(InFlightLimit::new(buffer, MAX_IN_FLIGHT))
+                HttpIdle::from(InFlightLimit::new(buffer, MAX_IN_FLIGHT))
             })
             .map_err(|_| bind::BufferSpawnError::Inbound)
     }

@@ -60,7 +60,7 @@ use tower_fn::*;
 use conduit_proxy_router::{IsIdle, Recognize, Router, Error as RouteError};
 
 pub mod app;
-mod http_activity;
+mod http_idle;
 mod bind;
 pub mod config;
 mod connection;

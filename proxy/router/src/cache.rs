@@ -194,11 +194,12 @@ impl Now for () {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::Future;
     use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
-    use tests::MultiplyAndAssign;
     use tower_service::Service;
+
+    use ::tests::MultiplyAndAssign;
+    use super::*;
 
     #[derive(Clone)]
     struct Clock(Rc<RefCell<Instant>>);

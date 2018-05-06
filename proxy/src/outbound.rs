@@ -14,11 +14,11 @@ use tower_in_flight_limit::InFlightLimit;
 use tower_h2;
 use conduit_proxy_router::Recognize;
 
-use http_activity::HttpActivity;
 use bind::{self, Bind, Protocol};
 use control::{self, discovery};
 use control::discovery::Bind as BindTrait;
 use ctx;
+use http_idle::HttpIdle;
 use timeout::Timeout;
 use telemetry::sensor;
 use transparency::{h1, HttpBody};
@@ -76,7 +76,7 @@ where
     type Error = <Self::Service as tower::Service>::Error;
     type Key = (Destination, Protocol);
     type RouteError = bind::BufferSpawnError;
-    type Service = HttpActivity<
+    type Service = HttpIdle<
         InFlightLimit<Timeout<Buffer<Balance<
             load::WithPendingRequests<Discovery<B>>,
             choose::PowerOfTwoChoices<rand::ThreadRng>
@@ -169,7 +169,7 @@ where
 
         let timeout = Timeout::new(buffer, self.bind_timeout, handle);
 
-        Ok(HttpActivity::from(InFlightLimit::new(timeout, MAX_IN_FLIGHT)))
+        Ok(HttpIdle::from(InFlightLimit::new(timeout, MAX_IN_FLIGHT)))
     }
 }
 

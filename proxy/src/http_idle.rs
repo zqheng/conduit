@@ -1,15 +1,15 @@
-use conduit_proxy_router::{IsIdle, TrackActivity};
+use conduit_proxy_router::{IsIdle, Idle};
 use futures::{Future, Poll};
 use http;
 use tower_service::Service;
 
 /// Keeps an account of how many HTTP requests are active
-pub struct HttpActivity<S, A, B>
+pub struct HttpIdle<S, A, B>
 where
     S: Service<Request = http::Request<A>, Response = http::Response<B>>,
 {
     inner: S,
-    track: TrackActivity,
+    idle: Idle,
 }
 
 pub struct Respond<F, B>
@@ -17,32 +17,32 @@ where
     F: Future<Item = http::Response<B>>,
 {
     inner: F,
-    track: TrackActivity,
+    idle: Idle,
 }
 
 
-impl<S, A, B> From<S> for HttpActivity<S, A, B>
+impl<S, A, B> From<S> for HttpIdle<S, A, B>
 where
     S: Service<Request = http::Request<A>, Response = http::Response<B>>,
 {
     fn from(inner: S) -> Self {
         Self {
             inner,
-            track: TrackActivity::default(),
+            idle: Idle::default(),
         }
     }
 }
 
-impl<S, A, B> IsIdle for HttpActivity<S, A, B>
+impl<S, A, B> IsIdle for HttpIdle<S, A, B>
 where
     S: Service<Request = http::Request<A>, Response = http::Response<B>>,
 {
     fn is_idle(&self) -> bool {
-        self.track.is_idle()
+        self.idle.is_idle()
     }
 }
 
-impl<S, A, B> Service for HttpActivity<S, A, B>
+impl<S, A, B> Service for HttpIdle<S, A, B>
 where
     S: Service<Request = http::Request<A>, Response = http::Response<B>>,
 {
@@ -56,10 +56,10 @@ where
     }
 
     fn call(&mut self, mut req: Self::Request) -> Self::Future {
-        req.extensions_mut().insert(self.track.active());
+        req.extensions_mut().insert(self.idle.active());
         Respond {
             inner: self.inner.call(req),
-            track: self.track.clone(),
+            idle: self.idle.clone(),
         }
     }
 }
@@ -73,7 +73,7 @@ where
 
     fn poll(&mut self) -> Poll<http::Response<B>, Self::Error> {
         let mut rsp = try_ready!(self.inner.poll());
-        rsp.extensions_mut().insert(self.track.active());
+        rsp.extensions_mut().insert(self.idle.active());
         Ok(rsp.into())
     }
 }

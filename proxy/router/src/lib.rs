@@ -11,10 +11,10 @@ use std::{
 };
 use tower_service::Service;
 
-pub mod activity;
+pub mod idle;
 mod cache;
 
-pub use self::activity::{IsIdle, Active, TrackActivity};
+pub use self::idle::{Active, Idle, IsIdle};
 use self::cache::Cache;
 
 /// Routes requests based on a configurable `Key`.
@@ -305,7 +305,10 @@ mod tests {
     #[derive(Clone)]
     pub struct Recognize;
 
-    pub struct MultiplyAndAssign(usize, super::TrackActivity);
+    pub struct MultiplyAndAssign {
+        value: usize,
+        idle: super::Idle
+    }
 
     pub enum Request {
         NotRecognized,
@@ -353,22 +356,25 @@ mod tests {
                 Request::NotRecognized => unreachable!(),
                 Request::Recgonized(n) => n,
             };
-            self.0 *= n;
+            self.value *= n;
 
-            let active = Some(self.1.active());
-            future::ok(Response { active, value: self.0 })
+            let active = Some(self.idle.active());
+            future::ok(Response { active, value: self.value })
         }
     }
 
     impl Default for MultiplyAndAssign {
         fn default() -> Self {
-            MultiplyAndAssign(1, super::TrackActivity::default())
+            Self {
+                value: 1,
+                idle: super::Idle::default(),
+            }
         }
     }
 
     impl super::IsIdle for MultiplyAndAssign {
         fn is_idle(&self) -> bool {
-            self.1.is_idle()
+            self.idle.is_idle()
         }
     }
 
