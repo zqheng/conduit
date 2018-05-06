@@ -3,27 +3,28 @@ extern crate indexmap;
 extern crate tower_service;
 
 use futures::{Future, Poll};
-use indexmap::IndexMap;
 use std::{
     error, fmt, mem,
-    collections::VecDeque,
     hash::Hash,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::Duration,
 };
 use tower_service::Service;
 
 pub mod activity;
+mod cache;
 
-pub use self::activity::{Activity, HasActivity, TrackActivity, PendingRequest, ActiveResponse};
+pub use self::activity::{Activity, Active, TrackActivity};
+use self::cache::Cache;
 
 /// Routes requests based on a configurable `Key`.
 pub struct Router<T>
 where
-    T: Recognize,
-    T::Service: HasActivity,
+    T: Recognize + Clone,
+    T::Service: Activity,
 {
-    inner: Arc<Mutex<Inner<T>>>,
+    cache: Arc<Mutex<Cache<T::Key, T::Service>>>,
+    recognize: T,
 }
 
 /// Provides a strategy for routing a Request to a Service.
@@ -78,31 +79,15 @@ pub enum Error<T, U> {
 pub struct ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: HasActivity,
+    T::Service: Activity,
 {
     state: State<T>,
-}
-
-type LastUsed<K> = VecDeque<Used<K>>;
-
-struct Inner<T>
-where T: Recognize,
-{
-    routes: IndexMap<T::Key, T::Service>,
-    last_used: LastUsed<T::Key>,
-    recognize: T,
-    capacity: usize,
-}
-
-struct Used<K> {
-    key: K,
-    time: Instant,
 }
 
 enum State<T>
 where
     T: Recognize,
-    T::Service: HasActivity,
+    T::Service: Activity,
 {
     Inner(<T::Service as Service>::Future),
     RouteError(T::RouteError),
@@ -111,110 +96,25 @@ where
     Invalid,
 }
 
-impl<K> From<K> for Used<K> {
-    fn from(key: K) -> Self {
-        Self {
-            key,
-            time: Instant::now(),
-        }
-    }
-}
-
-// ===== impl Inner =====
-
-impl<T> Inner<T>
-where
-    T: Recognize,
-    T::Service: HasActivity,
-{
-    fn new(recognize: T, capacity: usize) -> Self {
-        Self {
-            routes: IndexMap::default(),
-            last_used: LastUsed::new(),
-            recognize,
-            capacity,
-        }
-    }
-
-    fn current_capacity(&self) -> usize {
-        self.capacity - self.routes.len()
-    }
-
-    fn create_capacity(&mut self) {
-        for idx in 0..self.last_used.len() {
-            let idle = self.routes
-                .get(&self.last_used[idx].key)
-                .map(|r| {
-                    let a = r.activity();
-                    a.pending_requests() + a.active_responses() > 0
-                })
-                .unwrap_or(false);
-
-            if idle {
-                Self::move_to_end(&mut self.last_used, idx);
-                if let Some(Used{key, ..}) = self.last_used.pop_back() {
-                    self.routes.remove(&key);
-                }
-                return;
-            }
-        }
-    }
-
-    fn move_to_end(last_used: &mut LastUsed<T::Key>, idx: usize) {
-        for i in idx..last_used.len()-1 {
-            last_used.swap(i, i + 1);
-        }
-    }
-
-    fn mark_route(&mut self, key: &T::Key) -> Option<&mut T::Service> {
-        match self.routes.get_mut(key) {
-            None => None,
-            Some(svc) => {
-                Self::mark_used(&mut self.last_used, key);
-                Some(svc)
-            }
-        }
-    }
-
-    fn add_route(&mut self, key: T::Key, service: T::Service) {
-        Self::mark_used(&mut self.last_used, &key);
-        self.routes.insert(key, service);
-    }
-
-    fn mark_used(last_used: &mut LastUsed<T::Key>, key: &T::Key) {
-        match last_used.iter().rposition(|&Used{key: ref k, ..}| k == key) {
-            Some(idx) => {
-                last_used[idx].time = Instant::now();
-                for i in idx..last_used.len()-1 {
-                    last_used.swap(i, i + 1);
-                }
-            }
-
-            None => {
-                last_used.push_back(key.clone().into());
-            }
-        }
-    }
-}
-
 // ===== impl Router =====
 
 impl<T> Router<T>
 where
-    T: Recognize,
-    T::Service: HasActivity,
+    T: Recognize + Clone,
+    T::Service: Activity,
 {
-    pub fn new(recognize: T, capacity: usize) -> Self {
+    pub fn new(recognize: T, capacity: usize, min_idle_age: Duration) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner::new(recognize, capacity))),
+            recognize,
+            cache: Arc::new(Mutex::new(Cache::new(capacity, min_idle_age))),
         }
     }
 }
 
 impl<T> Service for Router<T>
 where
-    T: Recognize,
-    T::Service: HasActivity,
+    T: Recognize + Clone,
+    T::Service: Activity,
 {
     type Request = T::Request;
     type Response = T::Response;
@@ -236,48 +136,39 @@ where
     ///
     /// The response fails when the request cannot be routed.
     fn call(&mut self, request: Self::Request) -> Self::Future {
-        let inner = &mut *self.inner.lock().expect("router lock");
-
-        let key = match inner.recognize.recognize(&request) {
+        let key = match self.recognize.recognize(&request) {
             Some(key) => key,
             None => return ResponseFuture::not_recognized(),
         };
 
+
+        let cache = &mut *self.cache.lock().expect("router lock");
+
         // First, try to load a cached route for `key`.
-        if let Some(svc) = inner.mark_route(&key) {
+        if let Some(svc) = cache.get_route(&key) {
             return ResponseFuture::new(svc.call(request));
         }
 
         // Since there wasn't a cached route, ensure that there is capacity for a
         // new one.
-        if inner.current_capacity() == 0 {
-            // If the cache is full, evict the oldest inactive route.
-            inner.create_capacity();
-        }
-        // If all routes are active, fail the request.
-        if inner.current_capacity() == 0 {
-            return ResponseFuture::no_capacity(inner.capacity);
+        if cache.available_capacity() == 0 {
+            // If the cache is full, evict the oldest idle route.
+            cache.evict_oldest_idle_route();
+            // If all routes are active, fail the request.
+            if cache.available_capacity() == 0 {
+                return ResponseFuture::no_capacity(cache.capacity());
+            }
         }
 
         // Bind a new route, send the request on the route, and cache the route.
-        let mut service = match inner.recognize.bind_service(&key) {
+        let mut service = match self.recognize.bind_service(&key) {
             Ok(service) => service,
             Err(e) => return ResponseFuture::route_err(e),
         };
 
         let response = service.call(request);
-        inner.add_route(key, service);
+        cache.add_route(key, service);
         ResponseFuture::new(response)
-    }
-}
-
-impl<T> Clone for Router<T>
-where
-    T: Recognize,
-    T::Service: HasActivity,
-{
-    fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
     }
 }
 
@@ -311,7 +202,7 @@ impl<S: Service> Recognize for Single<S> {
 impl<T> ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: HasActivity,
+    T::Service: Activity,
 {
     fn new(inner: <T::Service as Service>::Future) -> Self {
         ResponseFuture { state: State::Inner(inner) }
@@ -333,7 +224,7 @@ where
 impl<T> Future for ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: HasActivity,
+    T::Service: Activity,
 {
     type Item = T::Response;
     type Error = Error<T::Error, T::RouteError>;
@@ -399,21 +290,29 @@ where
 #[cfg(test)]
 mod tests {
     use futures::{Poll, Future, future};
+    use std::time::Duration;
     use tower_service::Service;
     use super::{Error, Router};
 
-    struct Recognize;
+    #[derive(Clone)]
+    pub struct Recognize;
 
-    struct MultiplyAndAssign(usize, super::TrackActivity);
+    pub struct MultiplyAndAssign(usize, super::TrackActivity);
 
-    enum Request {
+    pub enum Request {
         NotRecognized,
         Recgonized(usize),
     }
 
+    #[derive(Debug)]
+    pub struct Response {
+        pub value: usize,
+        pub active: Option<super::Active>,
+    }
+
     impl super::Recognize for Recognize {
         type Request = Request;
-        type Response = usize;
+        type Response = Response;
         type Error = ();
         type Key = usize;
         type RouteError = ();
@@ -427,40 +326,52 @@ mod tests {
         }
 
         fn bind_service(&mut self, _: &Self::Key) -> Result<Self::Service, Self::RouteError> {
-            Ok(MultiplyAndAssign(1, super::TrackActivity::default()))
+            Ok(MultiplyAndAssign::default())
         }
     }
 
     impl Service for MultiplyAndAssign {
         type Request = Request;
-        type Response = usize;
+        type Response = Response;
         type Error = ();
-        type Future = future::FutureResult<usize, ()>;
+        type Future = future::FutureResult<Response, ()>;
 
         fn poll_ready(&mut self) -> Poll<(), ()> {
             unimplemented!()
         }
 
         fn call(&mut self, req: Self::Request) -> Self::Future {
-            let _req = self.1.pending_request();
-            let _rsp = self.1.active_response();
             let n = match req {
                 Request::NotRecognized => unreachable!(),
                 Request::Recgonized(n) => n,
             };
             self.0 *= n;
-            future::ok(self.0)
+
+            let active = Some(self.1.active());
+            future::ok(Response { active, value: self.0 })
         }
     }
 
-    impl super::HasActivity for MultiplyAndAssign {
-        fn activity(&self) -> &super::Activity {
-            self.1.activity()
+    impl Default for MultiplyAndAssign {
+        fn default() -> Self {
+            MultiplyAndAssign(1, super::TrackActivity::default())
+        }
+    }
+
+    impl super::Activity for MultiplyAndAssign {
+        fn is_idle(&self) -> bool {
+            self.1.is_idle()
+        }
+    }
+
+    impl From<usize> for Request {
+        fn from(n: usize) -> Self {
+            Request::Recgonized(n)
         }
     }
 
     impl Router<Recognize> {
-        fn call_ok(&mut self, req: Request) -> usize {
+        fn call_ok(&mut self, req: Request) -> Response {
             self.call(req).wait().expect("should route")
         }
 
@@ -471,31 +382,44 @@ mod tests {
 
     #[test]
     fn invalid() {
-        let mut router = Router::new(Recognize, 1);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(0));
 
-        let rsp = router.call_err(Request::NotRecognized);
-        assert_eq!(rsp, Error::NotRecognized);
+        let err = router.call_err(Request::NotRecognized);
+        assert_eq!(err, Error::NotRecognized);
+    }
+
+    #[test]
+    fn cache_reuses_routes() {
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(0));
+
+        let rsp = router.call_ok(2.into());
+        assert_eq!(rsp.value, 2);
+
+        let rsp = router.call_ok(2.into());
+        assert_eq!(rsp.value, 4);
     }
 
     #[test]
     fn cache_limited_by_capacity() {
-        let mut router = Router::new(Recognize, 1);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(0));
 
-        let rsp = router.call_ok(Request::Recgonized(2));
-        assert_eq!(rsp, 2);
+        // Holding this response prevents the route from being evicted.
+        let rsp = router.call_ok(2.into());
+        assert_eq!(rsp.value, 2);
 
-        let rsp = router.call_err(Request::Recgonized(3));
-        assert_eq!(rsp, Error::NoCapacity(1));
+        let err = router.call_err(3.into());
+        assert_eq!(err, Error::NoCapacity(1));
     }
 
     #[test]
-    fn services_cached() {
-        let mut router = Router::new(Recognize, 1);
+    fn cache_reclaims_idle_capacity() {
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(0));
 
-        let rsp = router.call_ok(Request::Recgonized(2));
-        assert_eq!(rsp, 2);
+        let rsp = router.call_ok(2.into());
+        assert_eq!(rsp.value, 2);
+        drop(rsp);
 
-        let rsp = router.call_ok(Request::Recgonized(2));
-        assert_eq!(rsp, 4);
+        let rsp = router.call_ok(3.into());
+        assert_eq!(rsp.value, 3);
     }
 }
