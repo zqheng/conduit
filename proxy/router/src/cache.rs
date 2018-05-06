@@ -42,7 +42,7 @@ pub struct Exhausted {
 }
 
 /// Provides the current time to `Cache`. Useful for testing.
-pub trait Now: Clone {
+pub trait Now {
     fn now(&self) -> Instant;
 }
 
@@ -100,8 +100,8 @@ where
 {
     /// Accesses a route.
     ///
-    /// A mutable reference the route is wrapped in the returned `AccessGuard` to ensure
-    /// that the access-time is updated when the reference is released.
+    /// A mutable reference to the route is wrapped in the returned `AccessGuard` to
+    /// ensure that the access-time is updated when the reference is released.
     pub fn access<'a, Q>(&'a mut self, key: &Q) -> Option<AccessGuard<'a, V, N>>
     where
         Q: Hash + indexmap::Equivalent<K>,
