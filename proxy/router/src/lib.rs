@@ -14,14 +14,14 @@ use tower_service::Service;
 pub mod activity;
 mod cache;
 
-pub use self::activity::{Activity, Active, TrackActivity};
+pub use self::activity::{IsIdle, Active, TrackActivity};
 use self::cache::Cache;
 
 /// Routes requests based on a configurable `Key`.
 pub struct Router<T>
 where
-    T: Recognize + Clone,
-    T::Service: Activity,
+    T: Recognize,
+    T::Service: IsIdle,
 {
     cache: Arc<Mutex<Cache<T::Key, T::Service>>>,
     recognize: T,
@@ -79,7 +79,7 @@ pub enum Error<T, U> {
 pub struct ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: Activity,
+    T::Service: IsIdle,
 {
     state: State<T>,
 }
@@ -87,7 +87,7 @@ where
 enum State<T>
 where
     T: Recognize,
-    T::Service: Activity,
+    T::Service: IsIdle,
 {
     Inner(<T::Service as Service>::Future),
     RouteError(T::RouteError),
@@ -100,8 +100,8 @@ where
 
 impl<T> Router<T>
 where
-    T: Recognize + Clone,
-    T::Service: Activity,
+    T: Recognize,
+    T::Service: IsIdle,
 {
     pub fn new(recognize: T, capacity: usize, min_idle_age: Duration) -> Self {
         Self {
@@ -111,10 +111,23 @@ where
     }
 }
 
-impl<T> Service for Router<T>
+impl<T> Clone for Router<T>
 where
     T: Recognize + Clone,
-    T::Service: Activity,
+    T::Service: IsIdle,
+{
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            recognize: self.recognize.clone(),
+        }
+    }
+}
+
+impl<T> Service for Router<T>
+where
+    T: Recognize,
+    T::Service: IsIdle,
 {
     type Request = T::Request;
     type Response = T::Response;
@@ -197,7 +210,7 @@ impl<S: Service> Recognize for Single<S> {
 impl<T> ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: Activity,
+    T::Service: IsIdle,
 {
     fn new(inner: <T::Service as Service>::Future) -> Self {
         ResponseFuture { state: State::Inner(inner) }
@@ -219,7 +232,7 @@ where
 impl<T> Future for ResponseFuture<T>
 where
     T: Recognize,
-    T::Service: Activity,
+    T::Service: IsIdle,
 {
     type Item = T::Response;
     type Error = Error<T::Error, T::RouteError>;
@@ -353,7 +366,7 @@ mod tests {
         }
     }
 
-    impl super::Activity for MultiplyAndAssign {
+    impl super::IsIdle for MultiplyAndAssign {
         fn is_idle(&self) -> bool {
             self.1.is_idle()
         }

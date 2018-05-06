@@ -1,4 +1,4 @@
-use conduit_proxy_router::{Activity, HasActivity, TrackActivity};
+use conduit_proxy_router::{IsIdle, TrackActivity};
 use futures::{Future, Poll};
 use http;
 use tower_service::Service;
@@ -33,12 +33,12 @@ where
     }
 }
 
-impl<S, A, B> HasActivity for HttpActivity<S, A, B>
+impl<S, A, B> IsIdle for HttpActivity<S, A, B>
 where
     S: Service<Request = http::Request<A>, Response = http::Response<B>>,
 {
-    fn activity(&self) -> &Activity {
-        self.track.activity()
+    fn is_idle(&self) -> bool {
+        self.track.is_idle()
     }
 }
 
@@ -56,7 +56,7 @@ where
     }
 
     fn call(&mut self, mut req: Self::Request) -> Self::Future {
-        req.extensions_mut().insert(self.track.pending_request());
+        req.extensions_mut().insert(self.track.active());
         Respond {
             inner: self.inner.call(req),
             track: self.track.clone(),
@@ -73,7 +73,7 @@ where
 
     fn poll(&mut self) -> Poll<http::Response<B>, Self::Error> {
         let mut rsp = try_ready!(self.inner.poll());
-        rsp.extensions_mut().insert(self.track.active_response());
+        rsp.extensions_mut().insert(self.track.active());
         Ok(rsp.into())
     }
 }

@@ -34,6 +34,15 @@ impl<B> Inbound<B> {
     }
 }
 
+impl<B> Clone for Inbound<B> {
+    fn clone(&self) -> Self {
+        Self {
+            default_addr: self.default_addr.clone(),
+            bind: self.bind.clone(),
+        }
+    }
+}
+
 type ResponseBody = sensor::http::ResponseBody<HttpBody>;
 
 impl<B> Recognize for Inbound<B>

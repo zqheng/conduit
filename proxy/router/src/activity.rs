@@ -1,7 +1,7 @@
 
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
-pub trait Activity {
+pub trait IsIdle {
     fn is_idle(&self) -> bool;
 }
 
@@ -20,7 +20,7 @@ impl TrackActivity {
     }
 }
 
-impl Activity for TrackActivity {
+impl IsIdle for TrackActivity {
     fn is_idle(&self) -> bool {
         self.0.load(Ordering::Acquire) == 0
     }

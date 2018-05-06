@@ -49,6 +49,16 @@ impl<B> Outbound<B> {
     }
 }
 
+impl<B> Clone for Outbound<B> {
+    fn clone(&self) -> Self {
+        Self {
+            bind: self.bind.clone(),
+            discovery: self.discovery.clone(),
+            bind_timeout: self.bind_timeout.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Destination {
     Hostname(DnsNameAndPort),

@@ -1,7 +1,7 @@
 use indexmap::{self, IndexMap};
 use std::{hash::Hash, ops::{Deref, DerefMut}, time::{Duration, Instant}};
 
-use Activity;
+use IsIdle;
 
 /// An LRU cache for routes.
 ///
@@ -19,7 +19,7 @@ use Activity;
 pub struct Cache<K, V, N = ()>
 where
     K: Clone + Eq + Hash,
-    V: Activity,
+    V: IsIdle,
     N: Now,
 {
     /// The cache. The order of the map is not relevant (currently).
@@ -69,7 +69,7 @@ pub struct AccessGuard<'a, V: 'a, N: Now + 'a> {
 impl<K, V> Cache<K, V, ()>
 where
     K: Clone + Eq + Hash,
-    V: Activity,
+    V: IsIdle,
 {
     pub fn new(capacity: usize, max_idle_age: Duration) -> Self {
         Self {
@@ -95,7 +95,7 @@ where
 impl<K, V, N> Cache<K, V, N>
 where
     K: Clone + Eq + Hash,
-    V: Activity,
+    V: IsIdle,
     N: Now,
 {
     /// Accesses a route.
