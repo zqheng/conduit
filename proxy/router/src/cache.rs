@@ -53,7 +53,7 @@ struct Access<V> {
     last_access: Instant,
 }
 
-/// A smart pointer that updates an access time wheb dropped.
+/// A smart pointer that updates an access time when dropped.
 ///
 /// Wraps a mutable reference to a `V`-typed value.
 ///
