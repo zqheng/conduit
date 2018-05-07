@@ -108,26 +108,26 @@ where
         Ok(avail)
     }
 
-    // /// Overrides the time source for tests.
-    // #[cfg(test)]
-    // fn with_clock<M: access::Now>(self, now: M) -> Cache<K, V, R, M> {
-    //     Cache {
-    //         now,
-    //         routes: self.routes,
-    //         capacity: self.capacity,
-    //         retain: self.retain,
-    //     }
-    // }
+    /// Overrides the time source for tests.
+    #[cfg(test)]
+    fn with_clock<M: access::Now>(self, now: M) -> Cache<K, V, R, M> {
+        Cache {
+            now,
+            routes: self.routes,
+            capacity: self.capacity,
+            retain: self.retain,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use futures::Future;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, rc::Rc, time::Duration};
     use tower_service::Service;
 
-    use retain;
-    use test_util::MultiplyAndAssign;
+    use {retain, Now};
+    use test_util::{Clock, MultiplyAndAssign};
     use super::*;
 
     #[test]
@@ -171,5 +171,28 @@ mod tests {
 
         assert_eq!(cache.reserve(), Ok(1));
         assert_eq!(cache.routes.len(), 1);
+    }
+
+    #[test]
+    fn tracks_access() {
+        let mut clock = Clock::default();
+        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(1, retain::ALWAYS)
+            .with_clock(clock.clone());
+
+        let t0 = clock.now();
+        cache.store(123, MultiplyAndAssign::default()).unwrap();
+
+        clock.advance(Duration::from_secs(1));
+        let t1 = clock.now();
+        {
+            let access = cache.access(&123).unwrap();
+            assert_eq!(access.last_access(), t0);
+        }
+
+        clock.advance(Duration::from_secs(1));
+        {
+            let access = cache.access(&123).unwrap();
+            assert_eq!(access.last_access(), t1);
+        }
     }
 }

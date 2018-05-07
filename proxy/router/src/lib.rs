@@ -11,7 +11,7 @@ pub mod retain;
 mod router;
 mod single;
 
-pub use self::access::Access;
+pub use self::access::{Access, Now};
 pub use self::retain::Retain;
 pub use self::router::{Error, Router};
 pub use self::single::Single;

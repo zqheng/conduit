@@ -11,6 +11,13 @@ pub trait Now {
     fn now(&self) -> Instant;
 }
 
+/// Wraps values
+#[derive(Debug, PartialEq)]
+pub struct Node<T> {
+    value: T,
+    last_access: Instant,
+}
+
 /// A smart pointer that updates an access time when dropped.
 ///
 /// Wraps a mutable reference to a `V`-typed value.
@@ -20,13 +27,6 @@ pub trait Now {
 pub struct Access<'a, T: 'a, N: Now + 'a = ()> {
     node: &'a mut Node<T>,
     now: &'a N,
-}
-
-/// Holds the last-access time of a value.
-#[derive(Debug, PartialEq)]
-pub struct Node<T> {
-    target: T,
-    last_access: Instant,
 }
 
 // ===== impl Access =====
@@ -59,8 +59,8 @@ impl<'a, T: 'a, N: Now + 'a> Drop for Access<'a, T, N> {
 // ===== impl Node =====
 
 impl<T> Node<T> {
-    pub fn new(target: T, last_access: Instant) -> Self {
-        Node { target, last_access }
+    pub fn new(value: T, last_access: Instant) -> Self {
+        Node { value, last_access }
     }
 
     pub fn access<'a, N: Now + 'a>(&'a mut self, now: &'a N) -> Access<'a, T, N> {
@@ -75,13 +75,13 @@ impl<T> Node<T> {
 impl<T> Deref for Node<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &self.target
+        &self.value
     }
 }
 
 impl<T> DerefMut for Node<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.target
+        &mut self.value
     }
 }
 
