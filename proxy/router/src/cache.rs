@@ -1,7 +1,11 @@
+use indexmap::IndexMap;
 use std::hash::Hash;
 
-use access;
+use access::{Access, Node, Now};
 use retain::Retain;
+
+// Reexported so IndexMap isn't exposed.
+pub use indexmap::Equivalent;
 
 /// An LRU cache for routes.
 ///
@@ -20,10 +24,10 @@ pub struct Cache<K, V, R, N = ()>
 where
     K: Clone + Eq + Hash,
     R: Retain<V>,
-    N: access::Now,
+    N: Now,
 {
     /// A cache that retains the last access time of each target.
-    routes: access::AccessMap<K, V>,
+    routes: IndexMap<K, Node<V>>,
 
     /// The maximum number of entries in `routes`.
     capacity: usize,
@@ -49,7 +53,7 @@ where
 {
     pub fn new(capacity: usize, retain: R) -> Self {
         Self {
-            routes: access::AccessMap::default(),
+            routes: IndexMap::default(),
             capacity,
             retain,
             now: (),
@@ -62,15 +66,15 @@ impl<K, V, R, N> Cache<K, V, R, N>
 where
     K: Clone + Eq + Hash,
     R: Retain<V>,
-    N: access::Now,
+    N: Now,
 {
     /// Accesses a route.
     ///
     /// A mutable reference to the route is wrapped in the returned `Access` to
     /// ensure that the access-time is updated when the reference is released.
-    pub fn access<'a, Q>(&'a mut self, key: &Q) -> Option<access::Access<'a, V, N>>
+    pub fn access<'a, Q>(&'a mut self, key: &Q) -> Option<Access<'a, V, N>>
     where
-        Q: Hash + access::Equivalent<K>,
+        Q: Hash + Equivalent<K>,
     {
         let route = self.routes.get_mut(key)?;
         let access = route.access(&self.now);
@@ -83,7 +87,7 @@ where
     /// route. If no capacity can be reclaimed, an error is returned.
     pub fn store<U: Into<V>>(&mut self, key: K, route: U) -> Result<(), Exhausted> {
         self.reserve()?;
-        self.routes.insert(key, access::Node::new(route.into(), self.now.now()));
+        self.routes.insert(key, Node::new(route.into(), self.now.now()));
         Ok(())
     }
 
@@ -110,7 +114,7 @@ where
 
     /// Overrides the time source for tests.
     #[cfg(test)]
-    fn with_clock<M: access::Now>(self, now: M) -> Cache<K, V, R, M> {
+    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, R, M> {
         Cache {
             now,
             routes: self.routes,
@@ -134,7 +138,7 @@ mod tests {
     fn reserve_honors_retain() {
         pub struct Bool(Rc<RefCell<bool>>);
         impl<T> Retain<T> for Bool {
-            fn retain(&self, _: &access::Node<T>) -> bool {
+            fn retain(&self, _: &Node<T>) -> bool {
                 *self.0.borrow()
             }
         }
@@ -174,25 +178,55 @@ mod tests {
     }
 
     #[test]
-    fn tracks_access() {
+    fn last_access() {
         let mut clock = Clock::default();
         let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(1, retain::ALWAYS)
             .with_clock(clock.clone());
 
         let t0 = clock.now();
-        cache.store(123, MultiplyAndAssign::default()).unwrap();
+        cache.store(333, MultiplyAndAssign::default()).unwrap();
 
         clock.advance(Duration::from_secs(1));
         let t1 = clock.now();
         {
-            let access = cache.access(&123).unwrap();
+            let access = cache.access(&333).unwrap();
             assert_eq!(access.last_access(), t0);
         }
 
         clock.advance(Duration::from_secs(1));
         {
-            let access = cache.access(&123).unwrap();
+            let access = cache.access(&333).unwrap();
             assert_eq!(access.last_access(), t1);
+        }
+    }
+
+    #[test]
+    fn last_access_wiped_on_evict() {
+        let mut clock = Clock::default();
+        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(1, retain::NEVER)
+            .with_clock(clock.clone());
+
+        let t0 = clock.now();
+        cache.store(333, MultiplyAndAssign::default()).unwrap();
+
+        clock.advance(Duration::from_secs(1));
+        {
+            let access = cache.access(&333).unwrap();
+            assert_eq!(access.last_access(), t0);
+        }
+
+        // Cause the router to evict the `333` route.
+        clock.advance(Duration::from_secs(1));
+        cache.store(444, MultiplyAndAssign::default()).unwrap();
+
+        clock.advance(Duration::from_secs(1));
+        let t2 = clock.now();
+        cache.store(333, MultiplyAndAssign::default()).unwrap();
+
+        clock.advance(Duration::from_secs(1));
+        {
+            let access = cache.access(&333).unwrap();
+            assert_eq!(access.last_access(), t2);
         }
     }
 }
