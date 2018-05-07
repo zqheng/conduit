@@ -71,8 +71,6 @@ where
     /// Graceful backpressure is **not** supported at this level, since each request may
     /// be routed to different resources. Instead, requests should be issued and each
     /// route should support a queue of requests.
-    ///
-    /// TODO Attempt to free capacity in the router.
     fn poll_ready(&mut self) -> Poll<(), Self::Error> {
         Ok(().into())
     }
