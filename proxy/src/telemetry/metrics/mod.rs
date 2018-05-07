@@ -253,7 +253,7 @@ impl<T> From<T> for Stamped<T> {
 }
 
 impl<T> ::std::ops::Deref for Stamped<T> {
-    type Target = T;
+    type Route = T;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }

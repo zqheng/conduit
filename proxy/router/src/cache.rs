@@ -1,7 +1,7 @@
-use indexmap::{self, IndexMap};
-use std::{hash::Hash, ops::{Deref, DerefMut}, time::{Duration, Instant}};
+use std::hash::Hash;
 
-use IsIdle;
+use {access, Now};
+use retain::Retain;
 
 /// An LRU cache for routes.
 ///
@@ -15,21 +15,20 @@ use IsIdle;
 ///
 /// - `access` computes in O(1) time (amortized average).
 /// - `store` computes in O(1) time (average) when capacity is available.
-/// - When capacity is not available, `ensure_can_store` computes in O(n) time (average).
-pub struct Cache<K, V, N = ()>
+/// - When capacity is not available, `reserve` computes in O(n) time (average).
+pub struct Cache<K, V, R, N = ()>
 where
     K: Clone + Eq + Hash,
-    V: IsIdle,
+    R: Retain<V>,
     N: Now,
 {
-    /// The cache. The order of the map is not relevant (currently).
-    routes: IndexMap<K, Access<V>>,
+    /// A cache that retains the last access time of each target.
+    routes: access::Map<K, V>,
 
     /// The maximum number of entries in `routes`.
     capacity: usize,
 
-    /// The maximum age of idle instances that must be retained in the cache.
-    max_idle_age: Duration,
+    retain: R,
 
     /// The time source.
     now: N,
@@ -41,70 +40,37 @@ pub struct Exhausted {
     pub capacity: usize,
 }
 
-/// Provides the current time to `Cache`. Useful for testing.
-pub trait Now {
-    fn now(&self) -> Instant;
-}
-
-/// Holds the last-access time of a value.
-#[derive(Debug, PartialEq)]
-struct Access<V> {
-    value: V,
-    last_access: Instant,
-}
-
-/// A smart pointer that updates an access time when dropped.
-///
-/// Wraps a mutable reference to a `V`-typed value.
-///
-/// When the guard is dropped, the value's `last_access` time is updated with the provided
-/// time source.
-pub struct AccessGuard<'a, V: 'a, N: Now + 'a> {
-    access: &'a mut Access<V>,
-    now: &'a N,
-}
-
 // ===== impl Cache =====
 
-impl<K, V> Cache<K, V, ()>
+impl<K, V, R> Cache<K, V, R, ()>
 where
     K: Clone + Eq + Hash,
-    V: IsIdle,
+    R: Retain<V>,
 {
-    pub fn new(capacity: usize, max_idle_age: Duration) -> Self {
+    pub fn new(capacity: usize, retain: R) -> Self {
         Self {
-            routes: IndexMap::default(),
+            routes: access::Map::default(),
             capacity,
-            max_idle_age,
+            retain,
             now: (),
         }
     }
-
-    /// Overrides the time source for tests.
-    #[cfg(test)]
-    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, M> {
-        Cache {
-            now,
-            routes: self.routes,
-            capacity: self.capacity,
-            max_idle_age: self.max_idle_age,
-        }
-    }
 }
 
-impl<K, V, N> Cache<K, V, N>
+
+impl<K, V, R, N> Cache<K, V, R, N>
 where
     K: Clone + Eq + Hash,
-    V: IsIdle,
+    R: Retain<V>,
     N: Now,
 {
     /// Accesses a route.
     ///
-    /// A mutable reference to the route is wrapped in the returned `AccessGuard` to
+    /// A mutable reference to the route is wrapped in the returned `Access` to
     /// ensure that the access-time is updated when the reference is released.
-    pub fn access<'a, Q>(&'a mut self, key: &Q) -> Option<AccessGuard<'a, V, N>>
+    pub fn access<'a, Q>(&'a mut self, key: &Q) -> Option<access::Access<'a, V, N>>
     where
-        Q: Hash + indexmap::Equivalent<K>,
+        Q: Hash + access::Equivalent<K>,
     {
         let route = self.routes.get_mut(key)?;
         let access = route.access(&self.now);
@@ -115,25 +81,23 @@ where
     ///
     /// If the cache is full, idle routes may be evicted to create space for the new
     /// route. If no capacity can be reclaimed, an error is returned.
-    pub fn store<R: Into<V>>(&mut self, key: K, route: R) -> Result<(), Exhausted> {
-        self.ensure_can_store()?;
-
-        self.routes.insert(key, Access{
-            value: route.into(),
-            last_access: self.now.now(),
-        });
-
+    pub fn store<U: Into<V>>(&mut self, key: K, route: U) -> Result<(), Exhausted> {
+        self.reserve()?;
+        self.routes.insert(key, access::Track::new(route.into(), self.now.now()));
         Ok(())
     }
 
-    /// Returns the number of additional routes that may be stored.
+    /// Ensures that there is capacity to store an additional route.
     ///
-    /// If there are no available routes, try to evict idle routes to create capacity.
-    pub fn ensure_can_store(&mut self) -> Result<usize, Exhausted> {
+    /// Returns the number of additional routes that may be stored. If there are no
+    /// available routes, idle routes may be evicted to create capacity. If capacity
+    /// cannot be created, then an error is returned.
+    pub fn reserve(&mut self) -> Result<usize, Exhausted> {
         let mut avail = self.capacity - self.routes.len();
 
         if avail == 0 {
-            self.retain_active_and_recent_routes();
+            let retain = &self.retain;
+            self.routes.retain(|_, ref t| retain.retain(t));
 
             avail = self.capacity - self.routes.len();
             if avail == 0 {
@@ -144,51 +108,15 @@ where
         Ok(avail)
     }
 
-    /// Drops all routes that are idle and have not been accessed in
-    /// `max_idle_age`.
-    fn retain_active_and_recent_routes(&mut self) {
-        let epoch = self.now.now() - self.max_idle_age;
-        self.routes.retain(|_, &mut Access{value: ref route, last_access}| {
-            epoch < last_access || !route.is_idle()
-        });
-    }
-}
-
-// ===== impl Access =====
-
-impl<V> Access<V> {
-    fn access<'a, N: Now + 'a>(&'a mut self, now: &'a N) -> AccessGuard<'a, V, N> {
-        AccessGuard { now, access: self, }
-    }
-}
-
-// ===== impl AccessGuard =====
-
-impl<'a, V: 'a, N: Now + 'a> Deref for AccessGuard<'a, V, N> {
-    type Target = V;
-    fn deref(&self) -> &Self::Target {
-        &self.access.value
-    }
-}
-
-impl<'a, V: 'a, N: Now + 'a> DerefMut for AccessGuard<'a, V, N> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.access.value
-    }
-}
-
-impl<'a, V: 'a, N: Now + 'a> Drop for AccessGuard<'a, V, N> {
-    fn drop(&mut self) {
-        self.access.last_access = self.now.now();
-    }
-}
-
-// ===== impl Now =====
-
-/// Default source of time.
-impl Now for () {
-    fn now(&self) -> Instant {
-        Instant::now()
+    /// Overrides the time source for tests.
+    #[cfg(test)]
+    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, R, M> {
+        Cache {
+            now,
+            routes: self.routes,
+            capacity: self.capacity,
+            retain: self.retain,
+        }
     }
 }
 
@@ -199,6 +127,7 @@ mod tests {
     use tower_service::Service;
 
     use ::tests::MultiplyAndAssign;
+    use retain;
     use super::*;
 
     #[derive(Clone)]
@@ -220,94 +149,47 @@ mod tests {
     }
 
     #[test]
-    fn ensure_can_store_preserves_active_route() {
-        let mut cache = Cache::<usize, MultiplyAndAssign>::new(1, Duration::from_secs(0));
+    fn reserve_honors_retain() {
+        pub struct Bool(Rc<RefCell<bool>>);
+        impl<T> Retain<T> for Bool {
+            fn retain(&self, _: &access::Track<T>) -> bool {
+                *self.0.borrow()
+            }
+        }
+
+        let retain = Rc::new(RefCell::new(true));
+        let mut cache =
+            Cache::<usize, MultiplyAndAssign, _>::new(1, Bool(retain.clone()));
 
         let mut service = MultiplyAndAssign::default();
-        let mut rsp = service.call(1.into()).wait().unwrap();
+        service.call(1.into()).wait().unwrap();
 
         cache.store(1, service).unwrap();
         assert_eq!(cache.routes.len(), 1);
 
-        assert_eq!(cache.ensure_can_store(), Err(Exhausted { capacity: 1 }));
+        assert_eq!(cache.reserve(), Err(Exhausted { capacity: 1 }));
         assert_eq!(cache.routes.len(), 1);
 
-        rsp.active.take();
-        assert_eq!(cache.ensure_can_store(), Ok(1));
+        *retain.borrow_mut() = false;
+        assert_eq!(cache.reserve(), Ok(1));
         assert_eq!(cache.routes.len(), 0);
     }
 
     #[test]
-    fn ensure_can_store_after_max_idle_age() {
+    fn reserve_does_nothing_when_capacity_exists() {
         let clock = Clock::default();
-        let mut cache = Cache::<usize, MultiplyAndAssign>::new(1, Duration::from_secs(10))
-            .with_clock(clock.clone());
-
-        let rsp = {
-            let mut service = MultiplyAndAssign::default();
-            let rsp = service.call(1.into()).wait().unwrap();
-            cache.store(1, service).unwrap();
-            rsp
-        };
-
-        assert_eq!(cache.ensure_can_store(), Err(Exhausted { capacity: 1 }));
-        assert_eq!(cache.routes.len(), 1);
-
-        clock.advance(Duration::from_secs(5));
-        drop(rsp);
-        assert_eq!(cache.ensure_can_store(), Err(Exhausted { capacity: 1 }));
-        assert_eq!(cache.routes.len(), 1);
-
-        clock.advance(Duration::from_secs(6));
-        assert_eq!(cache.ensure_can_store(), Ok(1));
-        assert_eq!(cache.routes.len(), 0);
-    }
-
-    #[test]
-    fn ensure_can_store_does_nothing_when_capacity_exists() {
-        let clock = Clock::default();
-        let mut cache = Cache::<usize, MultiplyAndAssign>::new(2, Duration::from_secs(10))
+        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(2, retain::NEVER)
             .with_clock(clock.clone());
 
         // Create a route that goes idle immediately:
-        let rsp = {
+        {
             let mut service = MultiplyAndAssign::default();
             let rsp = service.call(1.into()).wait().unwrap();
             cache.store(1, service).unwrap();
-            rsp
         };
         assert_eq!(cache.routes.len(), 1);
 
-        drop(rsp);
-        assert_eq!(cache.ensure_can_store(), Ok(1));
-        assert_eq!(cache.routes.len(), 1);
-
-        // Some time later, create another route that does _not_ go idle:
-        clock.advance(Duration::from_secs(5));
-        let rsp = {
-            let mut service = MultiplyAndAssign::default();
-            let rsp = service.call(2.into()).wait().unwrap();
-            cache.store(2, service).unwrap();
-            rsp
-        };
-        assert_eq!(cache.ensure_can_store(), Err(Exhausted { capacity: 2 }));
-        assert_eq!(cache.routes.len(), 2);
-
-        // The first route should expire now:
-        clock.advance(Duration::from_secs(6));
-        assert_eq!(cache.ensure_can_store(), Ok(1));
-        assert_eq!(cache.routes.len(), 1);
-
-        // The second route should expire now; but it's still active, so it shouldn't be
-        // dropped:
-        clock.advance(Duration::from_secs(5));
-        assert_eq!(cache.ensure_can_store(), Ok(1));
-        assert_eq!(cache.routes.len(), 1);
-
-        // Once the route is no longer active, it can be dropped; but since there's
-        // available capacity it is not.
-        drop(rsp);
-        assert_eq!(cache.ensure_can_store(), Ok(1));
+        assert_eq!(cache.reserve(), Ok(1));
         assert_eq!(cache.routes.len(), 1);
     }
 }

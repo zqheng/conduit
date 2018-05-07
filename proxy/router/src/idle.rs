@@ -1,6 +1,8 @@
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
-/// A resource is considered idle when it is not being used to process messages.
+/// A resource is that can be idle.
+///
+/// A resource is considered idle when it is not actively being used or relied upon.
 pub trait IsIdle {
     fn is_idle(&self) -> bool;
 }
@@ -12,6 +14,8 @@ pub struct Idle(Arc<AtomicUsize>);
 /// A handle that decrements the number of active messages on drop.
 #[derive(Debug)]
 pub struct Active(Option<Arc<AtomicUsize>>);
+
+struct Retain;
 
 // ===== impl Idle =====
 
