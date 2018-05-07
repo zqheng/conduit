@@ -2,10 +2,10 @@ extern crate futures;
 extern crate indexmap;
 extern crate tower_service;
 
-use std::{hash::Hash, time::Instant};
+use std::hash::Hash;
 use tower_service::Service;
 
-mod access;
+pub mod access;
 mod cache;
 pub mod retain;
 mod router;
@@ -55,30 +55,20 @@ pub trait Recognize {
     fn bind_service(&mut self, key: &Self::Key) -> Result<Self::Service, Self::RouteError>;
 }
 
-/// Provides the current time within the module. Useful for testing.
-pub trait Now {
-    fn now(&self) -> Instant;
-}
-
-// ===== impl Now =====
-
-/// Default source of time.
-impl Now for () {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use futures::{Poll, Future, future};
+mod test_util {
+    use futures::{Poll, future};
+    use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
     use tower_service::Service;
 
-    use {retain, Error, Retain, Router};
+    use access;
 
+    /// An implementation of Recognize that binds with MultiplyAndAssign.
     #[derive(Clone)]
     pub struct Recognize;
 
+    /// A Service that updates its internal value with the product of that and a request's
+    /// value.
     pub struct MultiplyAndAssign {
         value: usize,
     }
@@ -92,6 +82,12 @@ mod tests {
     pub struct Response {
         pub value: usize,
     }
+
+    /// A mocked instance of `Now` to drive tests.
+    #[derive(Clone)]
+    pub struct Clock(Rc<RefCell<Instant>>);
+
+    // ===== impl Recognize =====
 
     impl super::Recognize for Recognize {
         type Request = Request;
@@ -110,6 +106,14 @@ mod tests {
 
         fn bind_service(&mut self, _: &Self::Key) -> Result<Self::Service, Self::RouteError> {
             Ok(MultiplyAndAssign::default())
+        }
+    }
+
+    // ===== impl MultiplyAndAssign =====
+
+    impl Default for MultiplyAndAssign {
+        fn default() -> Self {
+            Self { value: 1 }
         }
     }
 
@@ -134,11 +138,7 @@ mod tests {
         }
     }
 
-    impl Default for MultiplyAndAssign {
-        fn default() -> Self {
-            Self { value: 1 }
-        }
-    }
+    // ===== impl Request =====
 
     impl From<usize> for Request {
         fn from(n: usize) -> Self {
@@ -146,55 +146,23 @@ mod tests {
         }
     }
 
-    impl<R: Retain<MultiplyAndAssign>> Router<Recognize, R> {
-        fn call_ok(&mut self, req: Request) -> Response {
-            self.call(req).wait().expect("should route")
-        }
+    // ===== impl Clock =====
 
-        fn call_err(&mut self, req: Request) -> super::Error<(), ()> {
-            self.call(req).wait().expect_err("should not route")
+    impl Default for Clock {
+        fn default() -> Clock {
+            Clock(Rc::new(RefCell::new(Instant::now())))
         }
     }
 
-    #[test]
-    fn invalid() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
-
-        let err = router.call_err(Request::NotRecognized);
-        assert_eq!(err, Error::NotRecognized);
+    impl Clock {
+        pub fn advance(&mut self, d: Duration) {
+            *self.0.borrow_mut() += d;
+        }
     }
 
-    #[test]
-    fn reuses_routes() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
-
-        let rsp = router.call_ok(2.into());
-        assert_eq!(rsp.value, 2);
-
-        let rsp = router.call_ok(2.into());
-        assert_eq!(rsp.value, 4);
-    }
-
-    #[test]
-    fn limited_by_capacity() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
-
-        // Holding this response prevents the route from being evicted.
-        let rsp = router.call_ok(2.into());
-        assert_eq!(rsp.value, 2);
-
-        let err = router.call_err(3.into());
-        assert_eq!(err, Error::NoCapacity(1));
-    }
-
-    #[test]
-    fn reclaims_idle_capacity() {
-        let mut router = Router::new(Recognize, 1, retain::NEVER);
-
-        let rsp = router.call_ok(2.into());
-        assert_eq!(rsp.value, 2);
-
-        let rsp = router.call_ok(3.into());
-        assert_eq!(rsp.value, 3);
+    impl access::Now for Clock {
+        fn now(&self) -> Instant {
+            self.0.borrow().clone()
+        }
     }
 }

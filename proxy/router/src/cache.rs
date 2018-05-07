@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use {access, Now};
+use access;
 use retain::Retain;
 
 /// An LRU cache for routes.
@@ -20,10 +20,10 @@ pub struct Cache<K, V, R, N = ()>
 where
     K: Clone + Eq + Hash,
     R: Retain<V>,
-    N: Now,
+    N: access::Now,
 {
     /// A cache that retains the last access time of each target.
-    routes: access::Map<K, V>,
+    routes: access::AccessMap<K, V>,
 
     /// The maximum number of entries in `routes`.
     capacity: usize,
@@ -49,7 +49,7 @@ where
 {
     pub fn new(capacity: usize, retain: R) -> Self {
         Self {
-            routes: access::Map::default(),
+            routes: access::AccessMap::default(),
             capacity,
             retain,
             now: (),
@@ -62,7 +62,7 @@ impl<K, V, R, N> Cache<K, V, R, N>
 where
     K: Clone + Eq + Hash,
     R: Retain<V>,
-    N: Now,
+    N: access::Now,
 {
     /// Accesses a route.
     ///
@@ -83,7 +83,7 @@ where
     /// route. If no capacity can be reclaimed, an error is returned.
     pub fn store<U: Into<V>>(&mut self, key: K, route: U) -> Result<(), Exhausted> {
         self.reserve()?;
-        self.routes.insert(key, access::Track::new(route.into(), self.now.now()));
+        self.routes.insert(key, access::Node::new(route.into(), self.now.now()));
         Ok(())
     }
 
@@ -108,51 +108,33 @@ where
         Ok(avail)
     }
 
-    /// Overrides the time source for tests.
-    #[cfg(test)]
-    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, R, M> {
-        Cache {
-            now,
-            routes: self.routes,
-            capacity: self.capacity,
-            retain: self.retain,
-        }
-    }
+    // /// Overrides the time source for tests.
+    // #[cfg(test)]
+    // fn with_clock<M: access::Now>(self, now: M) -> Cache<K, V, R, M> {
+    //     Cache {
+    //         now,
+    //         routes: self.routes,
+    //         capacity: self.capacity,
+    //         retain: self.retain,
+    //     }
+    // }
 }
 
 #[cfg(test)]
 mod tests {
     use futures::Future;
-    use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
+    use std::{cell::RefCell, rc::Rc};
     use tower_service::Service;
 
-    use ::tests::MultiplyAndAssign;
     use retain;
+    use test_util::MultiplyAndAssign;
     use super::*;
-
-    #[derive(Clone)]
-    struct Clock(Rc<RefCell<Instant>>);
-    impl Default for Clock {
-        fn default() -> Clock {
-            Clock(Rc::new(RefCell::new(Instant::now())))
-        }
-    }
-    impl Clock {
-        fn advance(&self, d: Duration) {
-            *self.0.borrow_mut() += d;
-        }
-    }
-    impl Now for Clock {
-        fn now(&self) -> Instant {
-            self.0.borrow().clone()
-        }
-    }
 
     #[test]
     fn reserve_honors_retain() {
         pub struct Bool(Rc<RefCell<bool>>);
         impl<T> Retain<T> for Bool {
-            fn retain(&self, _: &access::Track<T>) -> bool {
+            fn retain(&self, _: &access::Node<T>) -> bool {
                 *self.0.borrow()
             }
         }
@@ -177,14 +159,12 @@ mod tests {
 
     #[test]
     fn reserve_does_nothing_when_capacity_exists() {
-        let clock = Clock::default();
-        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(2, retain::NEVER)
-            .with_clock(clock.clone());
+        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(2, retain::NEVER);
 
         // Create a route that goes idle immediately:
         {
             let mut service = MultiplyAndAssign::default();
-            let rsp = service.call(1.into()).wait().unwrap();
+            service.call(1.into()).wait().unwrap();
             cache.store(1, service).unwrap();
         };
         assert_eq!(cache.routes.len(), 1);
