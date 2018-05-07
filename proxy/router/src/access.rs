@@ -1,10 +1,4 @@
-
-use indexmap::IndexMap;
-pub use indexmap::Equivalent;
 use std::{ops::{Deref, DerefMut}, time::Instant};
-
-/// The order of the indexmap is not relevant (currently).
-pub type AccessMap<K, V> = IndexMap<K, Node<V>>;
 
 /// Provides the current time within the module. Useful for testing.
 pub trait Now {

@@ -57,7 +57,7 @@ use indexmap::IndexSet;
 use tokio_core::reactor::{Core, Handle};
 use tower_service::NewService;
 use tower_fn::*;
-use conduit_proxy_router::{IsIdle, Recognize, Router, Error as RouteError};
+use conduit_proxy_router::{Recognize, Router, Retain, Error as RouteError, retain};
 
 pub mod app;
 mod http_idle;
@@ -231,7 +231,7 @@ where
             let router = Router::new(
                 Inbound::new(default_addr, bind),
                 config.inbound_router_capacity,
-                config.inbound_router_max_idle_age
+                retain::MaxAccessAge::new(config.inbound_router_max_idle_age),
             );
             let fut = serve(
                 inbound_listener,
@@ -256,7 +256,7 @@ where
             let router = Router::new(
                 Outbound::new(bind, control, config.bind_timeout),
                 config.outbound_router_capacity,
-                config.outbound_router_max_idle_age
+                retain::MaxAccessAge::new(config.outbound_router_max_idle_age),
             );
             let fut = serve(
                 outbound_listener,
@@ -334,9 +334,9 @@ where
     }
 }
 
-fn serve<R, B, E, F, G>(
+fn serve<R, K, B, E, F, G>(
     bound_port: BoundPort,
-    router: Router<R>,
+    router: Router<R, K>,
     tcp_connect_timeout: Duration,
     disable_protocol_detection_ports: IndexSet<u16>,
     proxy_ctx: Arc<ctx::Proxy>,
@@ -357,7 +357,7 @@ where
     >
         + Clone
         + 'static,
-    R::Service: IsIdle,
+    K: Retain<R::Service> + 'static,
     G: GetOriginalDst + 'static,
 {
     let stack = Arc::new(NewServiceFn::new(move || {

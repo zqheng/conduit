@@ -63,9 +63,9 @@ impl<T, A: Retain<T>, B: Retain<T>> Retain<T> for Or<T, A, B> {
 
 // ===== impl MaxAccessAge =====
 
-impl<T, N: access::Now> MaxAccessAge<T, N> {
-    pub fn new(age: Duration, now: N) -> Self {
-        MaxAccessAge { age, now, _p: PhantomData }
+impl<T> MaxAccessAge<T> {
+    pub fn new(age: Duration) -> Self {
+        MaxAccessAge { age, now: (), _p: PhantomData }
     }
 }
 
