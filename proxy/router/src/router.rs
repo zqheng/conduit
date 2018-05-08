@@ -7,12 +7,11 @@ use cache::{self, Cache};
 use retain::Retain;
 
 /// Routes requests based on a configurable `Key`.
-pub struct Router<T, R>
+pub struct Router<T>
 where
     T: Recognize,
-    R: Retain<T::Service>,
 {
-    cache: Arc<Mutex<Cache<T::Key, T::Service, R>>>,
+    cache: Arc<Mutex<Cache<T::Key, T::Service>>>,
     recognize: T,
 }
 

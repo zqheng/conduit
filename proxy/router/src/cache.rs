@@ -19,20 +19,19 @@ pub use indexmap::Equivalent;
 ///
 /// - `access` computes in O(1) time (amortized average).
 /// - `store` computes in O(1) time (average) when capacity is available.
-/// - When capacity is not available, `reserve` computes in O(n) time (average).
-pub struct Cache<K, V, R, N = ()>
+/// - `reserve` computes in O(n) time (average) when capacity is not available,
+pub struct Cache<K, V, N = ()>
 where
     K: Clone + Eq + Hash,
-    R: Retain<V>,
     N: Now,
 {
-    /// A cache that retains the last access time of each target.
+    /// A cache that tracks the last access time of each target.
     routes: IndexMap<K, Node<V>>,
 
     /// The maximum number of entries in `routes`.
     capacity: usize,
 
-    retain: R,
+    max_idle_age: Duration,,
 
     /// The time source.
     now: N,
@@ -46,26 +45,23 @@ pub struct Exhausted {
 
 // ===== impl Cache =====
 
-impl<K, V, R> Cache<K, V, R, ()>
+impl<K, V> Cache<K, V, ()>
 where
     K: Clone + Eq + Hash,
-    R: Retain<V>,
 {
-    pub fn new(capacity: usize, retain: R) -> Self {
+    pub fn new(capacity: usize, max_idle_age: Duration) -> Self {
         Self {
             routes: IndexMap::default(),
             capacity,
-            retain,
+            max_idle_age,
             now: (),
         }
     }
 }
 
-
-impl<K, V, R, N> Cache<K, V, R, N>
+impl<K, V, N> Cache<K, V, N>
 where
     K: Clone + Eq + Hash,
-    R: Retain<V>,
     N: Now,
 {
     /// Accesses a route.
@@ -98,10 +94,9 @@ where
     /// cannot be created, then an error is returned.
     pub fn reserve(&mut self) -> Result<usize, Exhausted> {
         let mut avail = self.capacity - self.routes.len();
-
         if avail == 0 {
-            let retain = &self.retain;
-            self.routes.retain(|_, ref t| retain.retain(t));
+            let epoch = self.now.now() - self.max_idle_age;
+            self.routes.retain(|_, &Node{ last_access, .. }| epoch <= last_access);
 
             avail = self.capacity - self.routes.len();
             if avail == 0 {
@@ -114,7 +109,7 @@ where
 
     /// Overrides the time source for tests.
     #[cfg(test)]
-    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, R, M> {
+    fn with_clock<M: Now>(self, now: M) -> Cache<K, V, M> {
         Cache {
             now,
             routes: self.routes,
