@@ -81,6 +81,11 @@ where
 // ===== impl Idle =====
 
 impl Idle {
+    #[cfg(test)]
+    fn is_idle(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 0
+    }
+
     pub fn active(&mut self) -> Active {
         self.0.fetch_add(1, Ordering::AcqRel);
         Active(Some(self.0.clone()))

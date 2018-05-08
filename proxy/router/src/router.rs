@@ -1,10 +1,9 @@
 use futures::{Future, Poll};
-use std::{error, fmt, mem, sync::{Arc, Mutex}};
+use std::{error, fmt, mem, sync::{Arc, Mutex}, time::Duration};
 use tower_service::Service;
 
 use Recognize;
 use cache::{self, Cache};
-use retain::Retain;
 
 /// Routes requests based on a configurable `Key`.
 pub struct Router<T>
@@ -35,17 +34,16 @@ enum State<T: Recognize> {
 
 // ===== impl Router =====
 
-impl<T: Recognize, R: Retain<T::Service>> Router<T, R> {
-    pub fn new(recognize: T, capacity: usize, retain: R) -> Self {
-        let cache = Arc::new(Mutex::new(Cache::new(capacity, retain)));
+impl<T: Recognize> Router<T> {
+    pub fn new(recognize: T, capacity: usize, max_idle_age: Duration) -> Self {
+        let cache = Arc::new(Mutex::new(Cache::new(capacity, max_idle_age)));
         Self { cache, recognize }
     }
 }
 
-impl<T, R> Clone for Router<T, R>
+impl<T> Clone for Router<T>
 where
     T: Recognize + Clone,
-    R: Retain<T::Service>
 {
     fn clone(&self) -> Self {
         Self {
@@ -55,10 +53,9 @@ where
     }
 }
 
-impl<T, R> Service for Router<T, R>
+impl<T> Service for Router<T>
 where
     T: Recognize,
-    R: Retain<T::Service>
 {
     type Request = T::Request;
     type Response = T::Response;
@@ -194,14 +191,15 @@ where
 #[cfg(test)]
 mod tests {
     use futures::Future;
+    use std::time::Duration;
     use tower_service::Service;
 
-    use test_util::{MultiplyAndAssign, Recognize, Request, Response};
-    use {retain, Error, Retain, Router};
+    use test_util::{Recognize, Request, Response};
+    use {Error, Router};
 
     // ===== impl Router =====
 
-    impl<R: Retain<MultiplyAndAssign>> Router<Recognize, R> {
+    impl Router<Recognize> {
         pub fn call_ok(&mut self, req: Request) -> Response {
             self.call(req).wait().expect("should route")
         }
@@ -213,7 +211,7 @@ mod tests {
 
     #[test]
     fn invalid() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(10));
 
         let err = router.call_err(Request::NotRecognized);
         assert_eq!(err, Error::NotRecognized);
@@ -221,7 +219,7 @@ mod tests {
 
     #[test]
     fn reuses_routes() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(10));
 
         let rsp = router.call_ok(2.into());
         assert_eq!(rsp.value, 2);
@@ -232,7 +230,7 @@ mod tests {
 
     #[test]
     fn limited_by_capacity() {
-        let mut router = Router::new(Recognize, 1, retain::ALWAYS);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(10));
 
         // Holding this response prevents the route from being evicted.
         let rsp = router.call_ok(2.into());
@@ -244,7 +242,7 @@ mod tests {
 
     #[test]
     fn reclaims_idle_capacity() {
-        let mut router = Router::new(Recognize, 1, retain::NEVER);
+        let mut router = Router::new(Recognize, 1, Duration::from_secs(10));
 
         let rsp = router.call_ok(2.into());
         assert_eq!(rsp.value, 2);

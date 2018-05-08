@@ -1,8 +1,8 @@
 use indexmap::IndexMap;
 use std::hash::Hash;
+use std::time::Duration;
 
 use access::{Access, Node, Now};
-use retain::Retain;
 
 // Reexported so IndexMap isn't exposed.
 pub use indexmap::Equivalent;
@@ -31,7 +31,7 @@ where
     /// The maximum number of entries in `routes`.
     capacity: usize,
 
-    max_idle_age: Duration,,
+    max_idle_age: Duration,
 
     /// The time source.
     now: N,
@@ -96,7 +96,7 @@ where
         let mut avail = self.capacity - self.routes.len();
         if avail == 0 {
             let epoch = self.now.now() - self.max_idle_age;
-            self.routes.retain(|_, &Node{ last_access, .. }| epoch <= last_access);
+            self.routes.retain(|_, n| epoch <= n.last_access());
 
             avail = self.capacity - self.routes.len();
             if avail == 0 {
@@ -114,7 +114,7 @@ where
             now,
             routes: self.routes,
             capacity: self.capacity,
-            retain: self.retain,
+            max_idle_age: self.max_idle_age,
         }
     }
 }
@@ -122,43 +122,16 @@ where
 #[cfg(test)]
 mod tests {
     use futures::Future;
-    use std::{cell::RefCell, rc::Rc, time::Duration};
+    use std::time::Duration;
     use tower_service::Service;
 
-    use {retain, Now};
+    use Now;
     use test_util::{Clock, MultiplyAndAssign};
     use super::*;
 
     #[test]
-    fn reserve_honors_retain() {
-        pub struct Bool(Rc<RefCell<bool>>);
-        impl<T> Retain<T> for Bool {
-            fn retain(&self, _: &Node<T>) -> bool {
-                *self.0.borrow()
-            }
-        }
-
-        let retain = Rc::new(RefCell::new(true));
-        let mut cache =
-            Cache::<usize, MultiplyAndAssign, _>::new(1, Bool(retain.clone()));
-
-        let mut service = MultiplyAndAssign::default();
-        service.call(1.into()).wait().unwrap();
-
-        cache.store(1, service).unwrap();
-        assert_eq!(cache.routes.len(), 1);
-
-        assert_eq!(cache.reserve(), Err(Exhausted { capacity: 1 }));
-        assert_eq!(cache.routes.len(), 1);
-
-        *retain.borrow_mut() = false;
-        assert_eq!(cache.reserve(), Ok(1));
-        assert_eq!(cache.routes.len(), 0);
-    }
-
-    #[test]
     fn reserve_does_nothing_when_capacity_exists() {
-        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(2, retain::NEVER);
+        let mut cache = Cache::<_, MultiplyAndAssign, _>::new(2, Duration::from_secs(0));
 
         // Create a route that goes idle immediately:
         {
@@ -173,9 +146,36 @@ mod tests {
     }
 
     #[test]
+    fn reserve_honors_max_idle_age() {
+        let mut clock = Clock::default();
+        let mut cache = Cache::<_, MultiplyAndAssign, _>::new(1, Duration::from_secs(2))
+            .with_clock(clock.clone());
+
+        // Touch `1` at 0s.
+        cache.store(1, MultiplyAndAssign::default()).unwrap();
+        assert_eq!(cache.reserve(), Err(Exhausted { capacity: 1 }));
+        assert_eq!(cache.routes.len(), 1);
+
+        // No capacity at 1s.
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(cache.reserve(), Err(Exhausted { capacity: 1 }));
+        assert_eq!(cache.routes.len(), 1);
+
+        // No capacity at 2s.
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(cache.reserve(), Err(Exhausted { capacity: 1 }));
+        assert_eq!(cache.routes.len(), 1);
+
+        // Capacity at >2s.
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(cache.reserve(), Ok(1));
+        assert_eq!(cache.routes.len(), 0);
+    }
+
+    #[test]
     fn last_access() {
         let mut clock = Clock::default();
-        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(1, retain::ALWAYS)
+        let mut cache = Cache::<_, MultiplyAndAssign, _>::new(1, Duration::from_secs(0))
             .with_clock(clock.clone());
 
         let t0 = clock.now();
@@ -183,45 +183,33 @@ mod tests {
 
         clock.advance(Duration::from_secs(1));
         let t1 = clock.now();
-        {
-            let access = cache.access(&333).unwrap();
-            assert_eq!(access.last_access(), t0);
-        }
+        assert_eq!(cache.access(&333).map(|n| n.last_access()), Some(t0));
 
         clock.advance(Duration::from_secs(1));
-        {
-            let access = cache.access(&333).unwrap();
-            assert_eq!(access.last_access(), t1);
-        }
+        assert_eq!(cache.access(&333).map(|n| n.last_access()), Some(t1));
     }
 
     #[test]
     fn last_access_wiped_on_evict() {
         let mut clock = Clock::default();
-        let mut cache = Cache::<_, MultiplyAndAssign, _, _>::new(1, retain::NEVER)
+        let mut cache = Cache::<_, MultiplyAndAssign, _>::new(1, Duration::from_secs(0))
             .with_clock(clock.clone());
 
         let t0 = clock.now();
         cache.store(333, MultiplyAndAssign::default()).unwrap();
 
         clock.advance(Duration::from_secs(1));
-        {
-            let access = cache.access(&333).unwrap();
-            assert_eq!(access.last_access(), t0);
-        }
+        assert_eq!(cache.access(&333).map(|n| n.last_access()), Some(t0));
 
         // Cause the router to evict the `333` route.
         clock.advance(Duration::from_secs(1));
         cache.store(444, MultiplyAndAssign::default()).unwrap();
 
         clock.advance(Duration::from_secs(1));
-        let t2 = clock.now();
+        let t1 = clock.now();
         cache.store(333, MultiplyAndAssign::default()).unwrap();
 
         clock.advance(Duration::from_secs(1));
-        {
-            let access = cache.access(&333).unwrap();
-            assert_eq!(access.last_access(), t2);
-        }
+        assert_eq!(cache.access(&333).map(|n| n.last_access()), Some(t1));
     }
 }
