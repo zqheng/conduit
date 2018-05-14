@@ -4,7 +4,11 @@ import { createMemoryHistory } from 'history';
 import React from 'react';
 import { Route, Router } from 'react-router';
 
-const componentDefaultProps = { api: ApiHelpers("") };
+const componentDefaultProps = {
+  api: ApiHelpers(""),
+  controllerNamespace: 'conduit',
+  releaseVersion: '',
+};
 
 export function routerWrap(Component, extraProps={}, route="/", currentLoc="/") {
   const createElement = (ComponentToWrap, props) => <ComponentToWrap {...(_.merge({}, componentDefaultProps, props, extraProps))} />;

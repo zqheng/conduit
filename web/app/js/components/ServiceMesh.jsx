@@ -7,6 +7,7 @@ import Metric from './Metric.jsx';
 import { numericSort } from './util/Utils.js';
 import PageHeader from './PageHeader.jsx';
 import Percentage from './util/Percentage.js';
+import PropTypes from 'prop-types';
 import React from 'react';
 import StatusTable from './StatusTable.jsx';
 import { Col, Row, Table, Tooltip } from 'antd';
@@ -98,7 +99,7 @@ const componentDeploys = {
   "web":          "web"
 };
 
-export default class ServiceMesh extends React.Component {
+class ServiceMesh extends React.Component {
   constructor(props) {
     super(props);
     this.loadFromServer = this.loadFromServer.bind(this);
@@ -335,3 +336,18 @@ export default class ServiceMesh extends React.Component {
     );
   }
 }
+
+ServiceMesh.propTypes = {
+  api: PropTypes.shape({
+    cancelCurrentRequests: PropTypes.func.isRequired,
+    ConduitLink: PropTypes.func.isRequired,
+    fetchMetrics: PropTypes.func.isRequired,
+    getCurrentPromises: PropTypes.func.isRequired,
+    setCurrentRequests: PropTypes.func.isRequired,
+    urlsForResource: PropTypes.object.isRequired, // TODO: generate a shape for this.
+  }).isRequired,
+  controllerNamespace: PropTypes.string.isRequired,
+  releaseVersion: PropTypes.string.isRequired,
+};
+
+export default ServiceMesh;

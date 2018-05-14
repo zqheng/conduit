@@ -2,14 +2,16 @@ import { ApiHelpers } from './util/ApiHelpers.jsx';
 import { Layout } from 'antd';
 import { Link } from 'react-router-dom';
 import logo from './../../img/logo_only.png';
+import PropTypes from 'prop-types';
 import React from 'react';
+import ReactRouterPropTypes from 'react-router-prop-types';
 import SocialLinks from './SocialLinks.jsx';
 import Version from './Version.jsx';
 import wordLogo from './../../img/reversed_logo.png';
 import { Icon, Menu } from 'antd';
 import './../../css/sidebar.css';
 
-export default class Sidebar extends React.Component {
+class Sidebar extends React.Component {
   constructor(props) {
     super(props);
     this.api= this.props.api;
@@ -145,3 +147,15 @@ export default class Sidebar extends React.Component {
     );
   }
 }
+
+Sidebar.propTypes = {
+  api: PropTypes.shape({
+    ConduitLink: PropTypes.func.isRequired,
+  }).isRequired,
+  location: ReactRouterPropTypes.location.isRequired,
+  pathPrefix: PropTypes.string.isRequired,
+  releaseVersion: PropTypes.string.isRequired,
+  uuid: PropTypes.string.isRequired,
+};
+
+export default Sidebar;

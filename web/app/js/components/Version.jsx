@@ -1,22 +1,32 @@
 import { Link } from 'react-router-dom';
+import PropTypes from 'prop-types';
 import React from 'react';
 import './../../css/version.css';
 
-export default class Version extends React.Component {
+class Version extends React.Component {
   renderVersionCheck() {
-    if (!this.props.latest) {
+    const {latest, error, isLatest} = this.props;
+
+    if (!latest) {
       return (<div>
         Version check failed
-        {this.props.error ? ": "+this.props.error : null}
-      </div>);
-    } else if (this.props.isLatest) {
-      return "Conduit is up to date";
-    } else {
-      return (<div>
-        A new version ({this.props.latest}) is available<br />
-        <Link to="https://versioncheck.conduit.io/update" className="button primary" target="_blank">Update Now</Link>
+        {error ? `: ${this.props.error}` : ''}
       </div>);
     }
+
+    if (isLatest) return "Conduit is up to date";
+
+    return (
+      <div>
+        A new version ({latest}) is available<br />
+        <Link
+          to="https://versioncheck.conduit.io/update"
+          className="button primary"
+          target="_blank">
+          Update Now
+        </Link>
+      </div>
+    );
   }
 
   render() {
@@ -29,3 +39,12 @@ export default class Version extends React.Component {
   }
 
 }
+
+Version.propTypes = {
+  error: PropTypes.string.isRequired,
+  isLatest: PropTypes.bool.isRequired,
+  latest: PropTypes.bool.isRequired,
+  releaseVersion: PropTypes.string.isRequired,
+};
+
+export default Version;

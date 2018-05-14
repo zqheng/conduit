@@ -43,7 +43,6 @@
     "react/no-did-update-set-state": 1,
     "react/no-multi-comp": [1, { "ignoreStateless": true }],
     "react/prefer-es6-class": 1,
-    "react/prop-types": 0, // TODO: enable prop type validation
     "react/self-closing-comp": 1,
     "react/sort-comp": 1,
     "react/sort-prop-types": 1,

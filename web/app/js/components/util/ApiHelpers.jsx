@@ -122,7 +122,7 @@ export const ApiHelpers = (pathPrefix, defaultMetricsWindow = '1m') => {
   class ConduitLink extends React.Component {
     render() {
       let prefix = pathPrefix;
-      if (this.props.deployment) {
+      if (!_.isEmpty(this.props.deployment)) {
         prefix = prefix.replace("/web:", "/"+this.props.deployment+":");
       }
       let url = `${prefix}${this.props.to}`;
@@ -136,13 +136,17 @@ export const ApiHelpers = (pathPrefix, defaultMetricsWindow = '1m') => {
       );
     }
   }
+
   ConduitLink.propTypes = {
+    children: PropTypes.node.isRequired,
     deployment: PropTypes.string,
     targetBlank: PropTypes.bool,
-    to: PropTypes.string,
+    to: PropTypes.string.isRequired,
   };
+
   ConduitLink.defaultProps = {
-    targetBlank: false
+    deployment: '',
+    targetBlank: false,
   };
 
   return {

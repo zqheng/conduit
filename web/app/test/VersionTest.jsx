@@ -12,6 +12,13 @@ import sinonStubPromise from 'sinon-stub-promise';
 Enzyme.configure({ adapter: new Adapter() });
 sinonStubPromise(sinon);
 
+const loc = {
+  pathname: '',
+  hash: '',
+  pathPrefix: '',
+  search: '',
+};
+
 describe('Version', () => {
   let curVer = "v1.2.3";
   let newVer = "v2.3.4";
@@ -46,7 +53,7 @@ describe('Version', () => {
     component = mount(
       <BrowserRouter>
         <Sidebar
-          location={{ pathname: ""}}
+          location={loc}
           api={apiHelpers}
           releaseVersion={curVer}
           uuid="fakeuuid" />
@@ -69,7 +76,7 @@ describe('Version', () => {
     component = mount(
       <BrowserRouter>
         <Sidebar
-          location={{ pathname: ""}}
+          location={loc}
           api={apiHelpers}
           releaseVersion={curVer}
           uuid="fakeuuid" />
@@ -92,7 +99,7 @@ describe('Version', () => {
     component = mount(
       <BrowserRouter>
         <Sidebar
-          location={{ pathname: ""}}
+          location={loc}
           api={apiHelpers}
           releaseVersion={curVer}
           uuid="fakeuuid" />
@@ -119,8 +126,10 @@ describe('Version', () => {
     component = mount(
       <BrowserRouter>
         <Sidebar
-          location={{ pathname: ""}}
-          api={apiHelpers} />
+          location={loc}
+          api={apiHelpers}
+          releaseVersion={curVer}
+          uuid="fakeuuid" />
       </BrowserRouter>
     );
 

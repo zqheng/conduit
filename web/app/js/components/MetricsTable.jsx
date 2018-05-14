@@ -68,7 +68,7 @@ const columnDefinitions = (sortable = true, resource, namespaces, onFilterClick,
               name={row.name}
               namespace={row.namespace}
               resource={resource}
-              conduitLink={ConduitLink} />
+              ConduitLink={ConduitLink} />
           );
         }
       }

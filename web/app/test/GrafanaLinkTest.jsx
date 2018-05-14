@@ -18,7 +18,7 @@ describe('GrafanaLink', () => {
       resource: "Replication Controller",
       name: "aldksf-3409823049823",
       namespace: "myns",
-      conduitLink: api.ConduitLink
+      ConduitLink: api.ConduitLink
     };
     let component = mount(routerWrap(GrafanaLink, linkProps));
 
